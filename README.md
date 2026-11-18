@@ -2,6 +2,8 @@
 
 Et interaktivt skript som setter opp foreldrekontroll på en Windows 11-PC med Windows sine egne verktøy. Ingen ekstra programvare, ingen konto i skyen, og alt kan fjernes igjen fra menyen.
 
+> **English summary:** An interactive PowerShell script (menus in Norwegian) that sets up parental control on Windows 11 using only built-in Windows features: a standard child account, screen time with warnings and automatic logoff, an app allowlist that blocks installing new apps and games (AppLocker on Pro/Education/Enterprise, Software Restriction Policies on Home), Wi-Fi network filters, a family DNS filter with forced SafeSearch and browser policies, and VPN/proxy blocking. Everything can be undone from the menu. Run `Start-Foreldrekontroll.cmd` as an administrator. Licensed under MIT.
+
 ## Kom i gang
 
 1. Kopier hele mappen til PC-en (alle filene må ligge sammen).
@@ -57,3 +59,7 @@ Logg så inn som voksen, velg **11** og kontroller med **9** at alt er borte.
 - `Setup-Foreldrekontroll.ps1`: menyen og alt oppsettet (PowerShell 5.1, som følger med Windows 11)
 - `Haandhever.ps1`: kjøres hvert minutt som SYSTEM (skjermtid og DNS)
 - `Start-Foreldrekontroll.cmd`: starter oppsettet som administrator
+
+## Lisens
+
+MIT, se [LICENSE](LICENSE). Bruk på eget ansvar, og test på en PC du kan sette tilbake.
