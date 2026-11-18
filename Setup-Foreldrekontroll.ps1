@@ -91,8 +91,16 @@ $ChildDeniedTools = @(
     '%WINDIR%\SysWOW64\wscript.exe', '%WINDIR%\SysWOW64\cscript.exe',
     '%WINDIR%\System32\mshta.exe', '%WINDIR%\SysWOW64\mshta.exe',
     '%WINDIR%\System32\rasphone.exe', '%WINDIR%\System32\rasdial.exe',
-    '%WINDIR%\System32\wsl.exe', '%WINDIR%\System32\bash.exe'
+    '%WINDIR%\System32\wsl.exe', '%WINDIR%\System32\bash.exe',
+    # .NET-kompilatorer og verktøy (MSBuild, csc, InstallUtil) kan kjøre egen kode.
+    '%WINDIR%\Microsoft.NET\*',
+    '%WINDIR%\System32\regsvr32.exe', '%WINDIR%\SysWOW64\regsvr32.exe',
+    '%WINDIR%\System32\cmstp.exe', '%WINDIR%\SysWOW64\cmstp.exe'
 )
+# Samme verktøy sperres også etter filnavnet i signaturen, så kopier (for eksempel i WinSxS) også stoppes.
+$ChildDeniedBinaries = @('CMD.EXE', 'POWERSHELL.EXE', 'POWERSHELL_ISE.EXE', 'PWSH.DLL', 'MSBUILD.EXE', 'CSC.EXE',
+    'VBC.EXE', 'INSTALLUTIL.EXE', 'REGASM.EXE', 'REGSVCS.EXE', 'REGSVR32.EXE', 'MSHTA.EXE', 'WSCRIPT.EXE', 'CSCRIPT.EXE', 'CMSTP.EXE')
+$MsPublisher = 'O=MICROSOFT CORPORATION, L=REDMOND, S=WASHINGTON, C=US'
 
 # Spillklienter (kjennes igjen på navn eller sti).
 $LauncherPattern = '(?i)steam|epic games|EpicGamesLauncher|\bEA app\b|EA Desktop|EADesktop|Origin|Battle\.net|Ubisoft|uplay|Riot Client|GOG Galaxy|Rockstar Games Launcher'
@@ -218,7 +226,7 @@ function Get-DefaultConfig {
         Bonus      = @{ Date = ''; Minutes = 0 }
         Apps       = @{
             Enabled = $false; AllowPaths = @(); DenyPaths = @(); DenyPackages = @()
-            BlockStore = $true; BlockXbox = $true; BlockTools = $true; StrictUac = $true
+            BlockStore = $true; BlockXbox = $true; BlockTools = $true; StrictUac = $true; WritableDirs = @()
         }
         Wifi       = @{
             Mode = 'off'; Ssids = @(); BlockNewAdapters = $false; DisableBtPan = $true; AppliedMode = 'off'; AppliedSsids = @()
@@ -228,7 +236,10 @@ function Get-DefaultConfig {
         Web        = @{ Enabled = $false; Provider = 'cleanbrowsing'; Servers = @(); BrowserPolicies = $true; BlockPublicDns = $true; DohAdded = @() }
         Vpn        = @{ Enabled = $false; DisableBuiltin = $true; BlockPorts = $true; HideSettings = $true }
         Extra      = @{ TimeZone = $false; WinRE = $false; RegEdit = $true }
-        Backup     = @{ Registry = @{}; Services = @{}; TimeZoneLine = ''; WinREDisabledByUs = $false; StoreRemovedFor = @() }
+        Backup     = @{
+            Registry = @{}; Services = @{}; TimeZoneLine = ''; WinREDisabledByUs = $false; StoreRemovedFor = @()
+            OneDrive = @{}; Dns = @{}; BtPanDisabled = @(); AppLockerSaved = $false
+        }
     }
 }
 
@@ -399,7 +410,11 @@ function Invoke-WithChildHive([hashtable]$Child, [scriptblock]$Script) {
     } finally {
         [GC]::Collect(); [GC]::WaitForPendingFinalizers(); Start-Sleep -Milliseconds 300
         $u = Invoke-Native "$env:windir\System32\reg.exe" "unload `"HKU\$mount`""
-        if ($u.ExitCode -ne 0) { Start-Sleep -Seconds 2; [GC]::Collect(); [void](Invoke-Native "$env:windir\System32\reg.exe" "unload `"HKU\$mount`"") }
+        if ($u.ExitCode -ne 0) {
+            Start-Sleep -Seconds 2; [GC]::Collect()
+            $u = Invoke-Native "$env:windir\System32\reg.exe" "unload `"HKU\$mount`""
+            if ($u.ExitCode -ne 0) { Write-Warn "Registeret til $($Child.Name) kunne ikke lukkes. Start PC-en på nytt før barnet logger på." }
+        }
     }
 }
 
@@ -414,8 +429,13 @@ function Protect-ChildPolicyKey([string]$KeyPath, [string]$ChildSid) {
         $id = New-Object Security.Principal.SecurityIdentifier $s
         $acl.AddAccessRule((New-Object Security.AccessControl.RegistryAccessRule($id, 'FullControl', $inh, $none, 'Allow')))
     }
-    $cid = New-Object Security.Principal.SecurityIdentifier $ChildSid
-    $acl.AddAccessRule((New-Object Security.AccessControl.RegistryAccessRule($cid, 'ReadKey', $inh, $none, 'Allow')))
+    # Barnet, eieren (OWNER RIGHTS), pakkeapper (ALL APPLICATION PACKAGES) og RESTRICTED får bare lese.
+    foreach ($s in @($ChildSid, 'S-1-3-4', 'S-1-15-2-1', 'S-1-5-12')) {
+        $id = New-Object Security.Principal.SecurityIdentifier $s
+        $acl.AddAccessRule((New-Object Security.AccessControl.RegistryAccessRule($id, 'ReadKey', $inh, $none, 'Allow')))
+    }
+    # Administratorer eier nøkkelen, ellers kunne barnet som eier gi seg selv skrivetilgang.
+    $acl.SetOwner((New-Object Security.Principal.SecurityIdentifier $SidAdmins))
     Set-Acl -LiteralPath $KeyPath -AclObject $acl
 }
 
@@ -491,7 +511,7 @@ function Set-ChildSrp([string]$Root, [hashtable]$Cfg, [string[]]$WritableDirs) {
     $allow = @($env:windir, $env:ProgramFiles, ${env:ProgramFiles(x86)}) + @($Cfg.Apps.AllowPaths)
     foreach ($a in ($allow | Where-Object { $_ } | Sort-Object -Unique)) { Add-Path '262144' $a 'Foreldrekontroll: tillatt' }
     $deny = @($WritableDirs) + @($Cfg.Apps.DenyPaths)
-    if ($Cfg.Apps.BlockTools) { $deny += @($ChildDeniedTools | ForEach-Object { Expand-AppLockerPath $_ }) }
+    if ($Cfg.Apps.BlockTools) { foreach ($t in $ChildDeniedTools) { $deny += @(Expand-AppLockerPath $t) } }
     foreach ($d in ($deny | Where-Object { $_ } | Sort-Object -Unique)) { Add-Path '0' ($d.TrimEnd('*').TrimEnd('\')) 'Foreldrekontroll: sperret' }
 }
 
@@ -505,15 +525,24 @@ function Set-ChildHive([hashtable]$Child, [hashtable]$Cfg, [string[]]$WritableDi
         if ($Remove) {
             $safer = "$Root\Software\Policies\Microsoft\Windows\Safer"
             if (Test-Path -LiteralPath $safer) { Remove-Item -LiteralPath $safer -Recurse -Force }
+            foreach ($k in @($Cfg.Backup.OneDrive.Keys | Where-Object { $_ -like "$($Child.Sid)|*" })) {
+                Set-PcReg "$Root\Software\Microsoft\Windows\CurrentVersion\Run" $k.Split('|')[1] $Cfg.Backup.OneDrive[$k] 'String'
+                $Cfg.Backup.OneDrive.Remove($k)
+            }
             return
         }
         foreach ($s in (Get-ChildRegSettings $Cfg)) { Set-PcReg "$Root\$($s.Path)" $s.Name $s.Value $s.Type }
-        if (Test-IsHomeEdition) { Set-ChildSrp $Root $Cfg $WritableDirs }
+        # Skrivbare mapper huskes fra siste skanning i meny 3, så andre menyer ikke lager hull i sperren.
+        $wd = @($WritableDirs | Where-Object { $_ })
+        if ($wd.Count -eq 0) { $wd = @($Cfg.Apps.WritableDirs | Where-Object { $_ }) }
+        if (Test-IsHomeEdition) { Set-ChildSrp $Root $Cfg $wd }
         if ($Cfg.Apps.Enabled) {
             # OneDrive ligger i barnets AppData og blir sperret; fjern autostart så det ikke kommer feilmeldinger.
             $run = "$Root\Software\Microsoft\Windows\CurrentVersion\Run"
-            Remove-PcReg $run 'OneDriveSetup'
-            Remove-PcReg $run 'OneDrive'
+            foreach ($n in @('OneDriveSetup', 'OneDrive')) {
+                $v = Get-PcReg $run $n
+                if ($null -ne $v) { $Cfg.Backup.OneDrive["$($Child.Sid)|$n"] = $v; Remove-PcReg $run $n }
+            }
         }
     }
 }
@@ -622,6 +651,7 @@ function Menu-Children([hashtable]$Cfg) {
                 $c = Select-Child $Cfg
                 if ($c) {
                     Set-ChildHive $c $Cfg @() $true
+                    Set-LogonHours @{ ScreenTime = @{ Enabled = $false } } $c
                     $Cfg.Children = @($Cfg.Children | Where-Object { $_.Sid -ne $c.Sid })
                     Save-Config $Cfg
                     Write-Ok "$($c.Name) er fjernet fra listen. Bruk 'Bruk alle innstillinger på nytt' for å oppdatere app-reglene."
@@ -736,11 +766,15 @@ function Set-LogonHours([hashtable]$Cfg, [hashtable]$Child) {
     } else {
         $offset = [int][math]::Floor([TimeZoneInfo]::Local.BaseUtcOffset.TotalHours)
         $order = @('Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday')
+        $today = (Get-Date).DayOfWeek.ToString()
+        $bonus = 0
+        if ($Cfg.Bonus -and $Cfg.Bonus.Date -eq (Get-Date).ToString('yyyy-MM-dd')) { $bonus = [int]$Cfg.Bonus.Minutes }
         for ($d = 0; $d -lt 7; $d++) {
             $r = $Cfg.ScreenTime.Days[$order[$d]]
-            if ($r.Limit -eq 0) { continue }
+            $extra = if ($order[$d] -eq $today) { $bonus } else { 0 }
+            if ($r.Limit -eq 0 -and $extra -le 0) { continue }
             $sh = [int]$r.Start.Split(':')[0] - 1
-            $eh = [int]$r.End.Split(':')[0] + 2
+            $eh = [int]$r.End.Split(':')[0] + 2 + [int][math]::Ceiling($extra / 60)
             if ([int]$r.End.Split(':')[1] -eq 0) { $eh -= 1 }
             for ($h = $sh; $h -lt $eh; $h++) {
                 $idx = (($d * 24 + $h - $offset) % 168 + 168) % 168
@@ -768,7 +802,7 @@ function Install-Files {
         if ((Test-Path -LiteralPath $src) -and ($src -ne $dst)) { Copy-Item -LiteralPath $src -Destination $dst -Force }
     }
     # Håndheveren kompilerer PcWts.dll på nytt neste gang (i tilfelle koden er endret).
-    Remove-Item -LiteralPath (Join-Path $InstallDir 'PcWts.dll') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $InstallDir 'PcWts2.dll') -Force -ErrorAction SilentlyContinue
     if (-not (Test-Path -LiteralPath (Join-Path $InstallDir 'Haandhever.ps1'))) {
         throw "Fant ikke Haandhever.ps1. Den må ligge i samme mappe som dette skriptet."
     }
@@ -826,6 +860,8 @@ function Menu-Bonus([hashtable]$Cfg) {
     if (-not [int]::TryParse($a, [ref]$n)) { Write-Err 'Ikke et tall.'; return }
     $Cfg.Bonus = @{ Date = $today; Minutes = [math]::Max(0, $have + $n) }
     Save-Config $Cfg
+    # Påloggingstidene utvides også, så ekstra tid kan brukes etter en utlogging eller omstart.
+    if ($Cfg.ScreenTime.Enabled) { foreach ($c in $Cfg.Children) { Set-LogonHours $Cfg $c } }
     Write-Ok "Ekstra tid i dag er nå $($Cfg.Bonus.Minutes) minutter."
 }
 
@@ -862,7 +898,7 @@ function Get-WritableDirs([hashtable]$Cfg) {
         if ((Split-Path -Leaf $dir) -eq 'WindowsApps') { continue }
         try { if ((Get-Item -LiteralPath $dir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { continue } } catch { continue }
         if (Test-DirWritable $dir $childSids) { [void]$res.Add($dir); continue }
-        if ($depth -lt 4) {
+        if ($depth -lt 6) {
             try { foreach ($d in [IO.Directory]::GetDirectories($dir)) { $stack.Push(@($d, $depth + 1)) } } catch { }
         }
     }
@@ -885,7 +921,12 @@ function Convert-ToAppLockerPath([string]$Path) {
 }
 
 function Expand-AppLockerPath([string]$Path) {
-    return $Path.Replace('%WINDIR%', $env:windir).Replace('%PROGRAMFILES%', $env:ProgramFiles).Replace('%SYSTEM32%', "$env:windir\System32")
+    # %PROGRAMFILES% betyr begge Program Files-mappene i AppLocker.
+    $p = $Path.Replace('%WINDIR%', $env:windir).Replace('%SYSTEM32%', "$env:windir\System32")
+    if ($p -like '*%PROGRAMFILES%*') {
+        return @(@($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ } | ForEach-Object { $p.Replace('%PROGRAMFILES%', $_) })
+    }
+    return @($p)
 }
 
 function Test-UnderAny([string]$Path, [string[]]$Dirs) {
@@ -1002,6 +1043,8 @@ function Menu-Apps([hashtable]$Cfg, [switch]$Wizard) {
         $Cfg.Apps.BlockStore = Read-YesNo 'Sperre Microsoft Store og App Installer (winget) for barnet?' $true
         $Cfg.Apps.BlockXbox = Read-YesNo 'Sperre Xbox-appen (den kan installere spill uten passord)?' $true
         $Cfg.Apps.BlockTools = Read-YesNo 'Sperre kommandolinje, PowerShell og andre verktøy som kan omgå sperrene? (Slå av hvis et spill ikke vil starte.)' $true
+        Write-Info 'Neste valg gjelder alle standardbrukere, ikke bare barnet. Bruker du selv en standardkonto til'
+        Write-Info 'hverdags, må du da logge på administratorkontoen for å gjøre endringer.'
         $Cfg.Apps.StrictUac = Read-YesNo 'Avvise "Kjør som administrator" i barnets økt automatisk (anbefalt)?' $true
     }
     Write-Info 'Leter etter installerte programmer og spill (kan ta litt tid) ...'
@@ -1112,9 +1155,9 @@ function New-AppLockerXml([hashtable]$Cfg, [string[]]$ChildSids, [string[]]$Othe
         }
         [void]$sb.Append('</FilePathRule>')
     }
-    function Add-AppxRule([string]$Name, [string]$Sid, [string]$Action, [string]$Publisher, [string]$Product) {
+    function Add-AppxRule([string]$Name, [string]$Sid, [string]$Action, [string]$Publisher, [string]$Product, [string]$Binary = '*') {
         [void]$sb.Append("<FilePublisherRule Id=`"$([guid]::NewGuid())`" Name=`"$(Esc $Name)`" Description=`"Foreldrekontroll`" UserOrGroupSid=`"$Sid`" Action=`"$Action`">")
-        [void]$sb.Append("<Conditions><FilePublisherCondition PublisherName=`"$(Esc $Publisher)`" ProductName=`"$(Esc $Product)`" BinaryName=`"*`">")
+        [void]$sb.Append("<Conditions><FilePublisherCondition PublisherName=`"$(Esc $Publisher)`" ProductName=`"$(Esc $Product)`" BinaryName=`"$(Esc $Binary)`">")
         [void]$sb.Append('<BinaryVersionRange LowSection="0.0.0.0" HighSection="*" /></FilePublisherCondition></Conditions></FilePublisherRule>')
     }
     $win = @(); $pf = @()
@@ -1138,7 +1181,10 @@ function New-AppLockerXml([hashtable]$Cfg, [string[]]$ChildSids, [string[]]$Othe
                 foreach ($p in $Cfg.Apps.AllowPaths) { Add-PathRule "Tillatt for barn: $p" $c 'Allow' ((Convert-ToAppLockerPath $p) + '\*') @() }
                 if ($type -eq 'Exe') {
                     foreach ($p in $Cfg.Apps.DenyPaths) { Add-PathRule "Sperret for barn: $p" $c 'Deny' ((Convert-ToAppLockerPath $p) + '\*') @() }
-                    if ($Cfg.Apps.BlockTools) { foreach ($t in $ChildDeniedTools) { Add-PathRule "Verktøy sperret for barn: $t" $c 'Deny' $t @() } }
+                    if ($Cfg.Apps.BlockTools) {
+                        foreach ($t in $ChildDeniedTools) { Add-PathRule "Verktøy sperret for barn: $t" $c 'Deny' $t @() }
+                        foreach ($b in $ChildDeniedBinaries) { Add-AppxRule "Verktøy sperret for barn: $b" $c 'Deny' $MsPublisher '*' $b }
+                    }
                 }
             }
         }
@@ -1162,6 +1208,28 @@ function Get-EmptyAppLockerXml {
     return '<AppLockerPolicy Version="1"><RuleCollection Type="Exe" EnforcementMode="NotConfigured" /><RuleCollection Type="Msi" EnforcementMode="NotConfigured" /><RuleCollection Type="Script" EnforcementMode="NotConfigured" /><RuleCollection Type="Dll" EnforcementMode="NotConfigured" /><RuleCollection Type="Appx" EnforcementMode="NotConfigured" /></AppLockerPolicy>'
 }
 
+function Save-AppLockerBackup([hashtable]$Cfg) {
+    # Ta vare på en AppLocker-policy som fantes før foreldrekontrollen, så den kan settes tilbake.
+    if ($Cfg.Backup.AppLockerSaved) { return }
+    try {
+        $old = Get-AppLockerPolicy -Local -Xml
+        Set-Content -LiteralPath (Join-Path $InstallDir 'applocker-foer.xml') -Value $old -Encoding UTF8
+    } catch { }
+    $Cfg.Backup.AppLockerSaved = $true
+}
+
+function Restore-AppLocker([hashtable]$Cfg) {
+    $b = Join-Path $InstallDir 'applocker-foer.xml'
+    if ($Cfg.Backup.AppLockerSaved -and (Test-Path -LiteralPath $b) -and ((Get-Content -LiteralPath $b -Raw) -match '<FilePathRule|<FilePublisherRule|<FileHashRule')) {
+        Set-AppLockerPolicy -XmlPolicy $b
+    } else {
+        Set-AppLockerFromXml (Get-EmptyAppLockerXml)
+        [void](Invoke-Native "$env:windir\System32\sc.exe" 'config AppIDSvc start= demand')
+    }
+    $Cfg.Backup.AppLockerSaved = $false
+    Remove-Item -LiteralPath $b -Force -ErrorAction SilentlyContinue
+}
+
 function Set-AppLockerFromXml([string]$Xml) {
     $f = Join-Path $InstallDir 'applocker.xml'
     Set-Content -LiteralPath $f -Value $Xml -Encoding UTF8
@@ -1170,7 +1238,11 @@ function Set-AppLockerFromXml([string]$Xml) {
 
 function Get-OtherUserSids([hashtable]$Cfg) {
     $childSids = @($Cfg.Children | ForEach-Object { $_.Sid })
-    return @(Get-LocalUser | Where-Object { $childSids -notcontains $_.SID.Value -and $_.SID.Value -notmatch '-(501|503|504)$' } | ForEach-Object { $_.SID.Value })
+    $res = @(Get-LocalUser | Where-Object { $childSids -notcontains $_.SID.Value -and $_.SID.Value -notmatch '-(501|503|504)$' } | ForEach-Object { $_.SID.Value })
+    # Også den som kjører skriptet (for eksempel en Microsoft Entra-/domenekonto som ikke er lokal).
+    $me = Get-CurrentUserSid
+    if ($childSids -notcontains $me) { $res += $me }
+    return @($res | Sort-Object -Unique)
 }
 
 function Set-StoreForChildHome([hashtable]$Cfg) {
@@ -1182,7 +1254,11 @@ function Set-StoreForChildHome([hashtable]$Cfg) {
     foreach ($c in $Cfg.Children) {
         foreach ($n in ($names | Sort-Object -Unique)) {
             foreach ($p in @(Get-AppxPackage -Name $n -User $c.Sid -ErrorAction SilentlyContinue)) {
-                try { Remove-AppxPackage -Package $p.PackageFullName -User $c.Sid -ErrorAction Stop; Write-Ok "$n er fjernet for $($c.Name)." }
+                try {
+                    Remove-AppxPackage -Package $p.PackageFullName -User $c.Sid -ErrorAction Stop
+                    Write-Ok "$n er fjernet for $($c.Name)."
+                    $Cfg.Backup.StoreRemovedFor = @($Cfg.Backup.StoreRemovedFor) + @("$($c.Name): $n")
+                }
                 catch { Write-Warn "Kunne ikke fjerne $n for $($c.Name): $($_.Exception.Message)" }
             }
         }
@@ -1192,7 +1268,8 @@ function Set-StoreForChildHome([hashtable]$Cfg) {
 function Apply-Apps([hashtable]$Cfg, [string[]]$Writable = $null) {
     $hklmInst = 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\Installer'
     $hklmUac  = 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
-    if ($null -eq $Writable) { $Writable = Get-WritableDirs $Cfg }
+    if ($null -eq $Writable -or @($Writable).Count -eq 0) { $Writable = Get-WritableDirs $Cfg }
+    $Cfg.Apps.WritableDirs = @($Writable)
     $childSids = @($Cfg.Children | ForEach-Object { $_.Sid })
     $isHome = Test-IsHomeEdition
 
@@ -1203,6 +1280,7 @@ function Apply-Apps([hashtable]$Cfg, [string[]]$Writable = $null) {
             Set-StoreForChildHome $Cfg
             Write-Ok 'Software Restriction Policies settes i barnets profil.'
         } else {
+            Save-AppLockerBackup $Cfg
             Set-AppLockerFromXml (New-AppLockerXml $Cfg $childSids (Get-OtherUserSids $Cfg) $Writable)
             [void](Invoke-Native "$env:windir\System32\sc.exe" 'config AppIDSvc start= auto')
             [void](Invoke-Native "$env:windir\System32\sc.exe" 'start AppIDSvc')
@@ -1212,7 +1290,7 @@ function Apply-Apps([hashtable]$Cfg, [string[]]$Writable = $null) {
     } else {
         Restore-ManagedHklm $Cfg $hklmInst 'DisableUserInstalls'
         Restore-ManagedHklm $Cfg $hklmUac 'ConsentPromptBehaviorUser'
-        if (-not $isHome) { Set-AppLockerFromXml (Get-EmptyAppLockerXml) }
+        if (-not $isHome) { Restore-AppLocker $Cfg }
         Write-Ok 'App-sperren er av.'
     }
     foreach ($c in $Cfg.Children) { Set-ChildHive $c $Cfg $Writable }
@@ -1302,6 +1380,10 @@ function Menu-Wifi([hashtable]$Cfg) {
         $saved = Get-SavedSsids
         $names = @(@($saved | ForEach-Object { $_.Ssid }) + (Get-VisibleSsids) + @($Cfg.Wifi.Ssids) | Where-Object { $_ } | Sort-Object -Unique)
         $current = Get-CurrentSsid
+        if (-not $current -and (Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -and $_.PhysicalMediaType -match '802\.11' })) {
+            Write-Warn 'Windows viser ikke navnet på nettverket du er koblet til. Det skjer ofte når posisjonstjenester er av'
+            Write-Warn '(Innstillinger > Personvern og sikkerhet > Plassering). Pass på at ditt eget nettverk er med i listen.'
+        }
         for ($i = 0; $i -lt $names.Count; $i++) {
             $tag = if ($names[$i] -eq $current) { ' (tilkoblet nå)' } else { '' }
             Write-Host ("  {0,3}. {1}{2}" -f ($i + 1), $names[$i], $tag)
@@ -1344,7 +1426,7 @@ function Apply-Wifi([hashtable]$Cfg, [switch]$Remove) {
     # Fjern også de alltid sperrede navnene (fra skriptet og fra håndheveren).
     $old = @($Cfg.Wifi.AppliedPrefixSsids)
     if (Test-Path -LiteralPath $WifiStatePath) {
-        try { $old += @(Get-Content -LiteralPath $WifiStatePath -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { }
+        try { $old += @(Get-Content -LiteralPath $WifiStatePath -Raw -Encoding UTF8 | ConvertFrom-Json | ForEach-Object { $_ }) } catch { }
         Remove-Item -LiteralPath $WifiStatePath -Force
     }
     foreach ($s in ($old | Where-Object { $_ } | Sort-Object -Unique)) {
@@ -1362,7 +1444,8 @@ function Apply-Wifi([hashtable]$Cfg, [switch]$Remove) {
         if ($mode -eq 'allow') { [void](Invoke-Native $netsh 'wlan add filter permission=denyall networktype=infrastructure') }
         [void](Invoke-Native $netsh 'wlan add filter permission=denyall networktype=adhoc')
         if ($mode -eq 'block') {
-            foreach ($p in (Get-SavedSsids | Where-Object { $Cfg.Wifi.Ssids -contains $_.Ssid })) {
+            $saved = Get-SavedSsids
+            foreach ($p in ($saved | Where-Object { $Cfg.Wifi.Ssids -ccontains $_.Ssid })) {
                 [void](Invoke-Native $netsh "wlan delete profile name=`"$($p.Profile)`"")
             }
         }
@@ -1384,7 +1467,8 @@ function Apply-Wifi([hashtable]$Cfg, [switch]$Remove) {
             }
             $Cfg.Wifi.AppliedPrefixSsids = @($names | Where-Object { -not ($mode -eq 'block' -and $Cfg.Wifi.Ssids -contains $_) })
         }
-        foreach ($p in (Get-SavedSsids | Where-Object { (Test-PrefixSsid $Cfg $_.Ssid) -and $names -contains $_.Ssid })) {
+        $saved = Get-SavedSsids
+        foreach ($p in ($saved | Where-Object { Test-PrefixSsid $Cfg $_.Ssid })) {
             [void](Invoke-Native $netsh "wlan delete profile name=`"$($p.Profile)`"")
         }
         Write-Ok "Alltid sperret: $(Format-Prefixes $Cfg)"
@@ -1407,9 +1491,14 @@ function Apply-Wifi([hashtable]$Cfg, [switch]$Remove) {
     # Bluetooth-nettverk (PAN)
     $pan = @(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -like '*Personal Area Network*' })
     foreach ($a in $pan) {
-        if (-not $Remove -and $Cfg.Wifi.DisableBtPan) { Disable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction SilentlyContinue }
-        else { Enable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction SilentlyContinue }
+        if (-not $Remove -and $Cfg.Wifi.DisableBtPan) {
+            if ($a.Status -ne 'Disabled' -and @($Cfg.Backup.BtPanDisabled) -notcontains $a.Name) { $Cfg.Backup.BtPanDisabled = @($Cfg.Backup.BtPanDisabled) + @($a.Name) }
+            Disable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction SilentlyContinue
+        } elseif (@($Cfg.Backup.BtPanDisabled) -contains $a.Name) {
+            Enable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction SilentlyContinue
+        }
     }
+    if ($Remove -or -not $Cfg.Wifi.DisableBtPan) { $Cfg.Backup.BtPanDisabled = @() }
     Save-Config $Cfg
 }
 
@@ -1448,6 +1537,14 @@ function Apply-Web([hashtable]$Cfg, [switch]$Remove) {
 
     $nics = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue)
     if ($on) {
+        # Husk faste DNS-tjenere som var satt fra før (tomt betyr automatisk fra ruteren).
+        foreach ($nic in $nics) {
+            $key = [string]$nic.InterfaceGuid
+            if ($Cfg.Backup.Dns.ContainsKey($key)) { continue }
+            $v4 = Get-PcReg "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$key" 'NameServer'
+            $v6 = Get-PcReg "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\$key" 'NameServer'
+            $Cfg.Backup.Dns[$key] = (@("$v4" -split '[ ,]+') + @("$v6" -split '[ ,]+') | Where-Object { $_ }) -join ','
+        }
         $p = $DnsProviders[$Cfg.Web.Provider]
         $Cfg.Web.Servers = @($p.V4) + @($p.V6)
         foreach ($nic in $nics) {
@@ -1470,16 +1567,22 @@ function Apply-Web([hashtable]$Cfg, [switch]$Remove) {
             # Bare DNS-portene (53, DoH 443, DoT/DoQ 853). Ping og annen trafikk til disse adressene går
             # fortsatt, siden noen spill og klienter bruker for eksempel 8.8.8.8 til å sjekke nettforbindelsen.
             New-NetFirewallRule -Name 'FK-DNS-tcp' -DisplayName 'Foreldrekontroll: sperr andre DNS-tjenere (TCP)' -Group $FwGroup `
-                -Direction Outbound -Action Block -Protocol TCP -RemotePort @('53', '443', '853') -RemoteAddress $PublicDns -Profile Any | Out-Null
+                -Direction Outbound -Action Block -Protocol TCP -RemotePort @('53', '443', '853', '5443', '8443') -RemoteAddress $PublicDns -Profile Any | Out-Null
             New-NetFirewallRule -Name 'FK-DNS-udp' -DisplayName 'Foreldrekontroll: sperr andre DNS-tjenere (UDP)' -Group $FwGroup `
-                -Direction Outbound -Action Block -Protocol UDP -RemotePort @('53', '443', '853') -RemoteAddress $PublicDns -Profile Any | Out-Null
+                -Direction Outbound -Action Block -Protocol UDP -RemotePort @('53', '443', '853', '5443', '8443') -RemoteAddress $PublicDns -Profile Any | Out-Null
         }
         Clear-DnsClientCache
         Write-Ok "Nettfilter: $($p.Name) ($(@($p.V4) -join ', '))"
     } else {
-        foreach ($nic in $nics) { Set-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -ResetServerAddresses -ErrorAction SilentlyContinue }
+        foreach ($nic in $nics) {
+            $key = [string]$nic.InterfaceGuid
+            $old = if ($Cfg.Backup.Dns.ContainsKey($key)) { [string]$Cfg.Backup.Dns[$key] } else { '' }
+            if ($old) { Set-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -ServerAddresses ($old -split ',') -ErrorAction SilentlyContinue }
+            else { Set-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -ResetServerAddresses -ErrorAction SilentlyContinue }
+        }
+        $Cfg.Backup.Dns = @{}
         $Cfg.Web.Servers = @()
-        Write-Ok 'Nettfilteret er av (DNS hentes automatisk igjen).'
+        Write-Ok 'Nettfilteret er av (DNS er satt tilbake slik den var).'
     }
     if (-not $Remove) { foreach ($c in $Cfg.Children) { Set-ChildHive $c $Cfg @() } }
     Save-Config $Cfg
@@ -1675,7 +1778,7 @@ function Invoke-RemoveAll([hashtable]$Cfg) {
         @{ N = 'Påloggingstider'; S = { $Cfg.ScreenTime.Enabled = $false; foreach ($c in $Cfg.Children) { Set-LogonHours $Cfg $c } } }
         @{ N = 'Apper';      S = {
             $Cfg.Apps.Enabled = $false
-            if (-not (Test-IsHomeEdition)) { Set-AppLockerFromXml (Get-EmptyAppLockerXml); Write-Ok 'AppLocker-reglene er fjernet.' }
+            if (-not (Test-IsHomeEdition)) { Restore-AppLocker $Cfg; Write-Ok 'AppLocker-reglene er fjernet.' }
             Restore-ManagedHklm $Cfg 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\Installer' 'DisableUserInstalls'
             Restore-ManagedHklm $Cfg 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'ConsentPromptBehaviorUser' } }
         @{ N = 'Wi-Fi';      S = { Apply-Wifi $Cfg -Remove } }
@@ -1695,7 +1798,12 @@ function Invoke-RemoveAll([hashtable]$Cfg) {
     $Cfg.Wifi.Mode = 'off'; $Cfg.Extra.TimeZone = $false; $Cfg.Extra.WinRE = $false; $Cfg.Extra.RegEdit = $false
     Save-Config $Cfg
     if ((Test-IsHomeEdition) -and @($Cfg.Children).Count) {
-        Write-Info 'Windows Home: Store-appen ble fjernet for barnet. Logg inn som barnet og kjør wsreset -i for å få den tilbake.'
+        $gone = @($Cfg.Backup.StoreRemovedFor | Sort-Object -Unique)
+        if ($gone.Count) {
+            Write-Info "Windows Home: disse appene ble fjernet for barnet: $($gone -join ', ')"
+            Write-Info 'Logg inn som barnet og kjør wsreset -i for å få Store tilbake, og installer de andre fra Store.'
+            $Cfg.Backup.StoreRemovedFor = @()
+        }
     }
     foreach ($c in @($Cfg.Children)) {
         if ((Get-LocalUser -SID $c.Sid -ErrorAction SilentlyContinue) -and (Read-YesNo "Slette kontoen $($c.Name) også (filene i profilen blir liggende)?" $false)) {
@@ -1705,6 +1813,9 @@ function Invoke-RemoveAll([hashtable]$Cfg) {
         }
     }
     Save-Config $Cfg
+    foreach ($f in @('PcWts2.dll', 'dns-reparert.json', 'applocker.xml', 'usage.json', 'wifi-sperret.json')) {
+        Remove-Item -LiteralPath (Join-Path $InstallDir $f) -Force -ErrorAction SilentlyContinue
+    }
     Write-Ok 'Foreldrekontrollen er fjernet. Start PC-en på nytt for at alt skal gjelde fullt ut.'
 }
 

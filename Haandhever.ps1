@@ -93,12 +93,14 @@ try {
             $netsh = "$env:windir\System32\netsh.exe"
             $known = @($cfg.Wifi.AppliedPrefixSsids) + @($cfg.Wifi.Ssids)
             $state = @()
-            if (Test-Path -LiteralPath $WifiStatePath) { $state = @(Get-Content -LiteralPath $WifiStatePath -Raw -Encoding UTF8 | ConvertFrom-Json) }
+            # ForEach-Object pakker ut lista (ConvertFrom-Json i PowerShell 5.1 gir hele lista som ett objekt).
+            if (Test-Path -LiteralPath $WifiStatePath) { $state = @(Get-Content -LiteralPath $WifiStatePath -Raw -Encoding UTF8 | ConvertFrom-Json | ForEach-Object { $_ }) }
             $out = (& $netsh wlan show networks mode=ssid) -join "`n"
             $added = $false
             foreach ($m in [regex]::Matches($out, '(?m)^SSID \d+\s*:\s*(.*?)\s*$')) {
                 $ssid = $m.Groups[1].Value
-                if (-not $ssid -or $known -contains $ssid -or $state -contains $ssid) { continue }
+                # Wi-Fi-navn skiller mellom store og små bokstaver, så sammenligningen må gjøre det også.
+                if (-not $ssid -or $known -ccontains $ssid -or $state -ccontains $ssid) { continue }
                 foreach ($p in $prefixes) {
                     if ($ssid -match ('^' + [regex]::Escape($p) + '\d+$')) {
                         $psi = New-Object Diagnostics.ProcessStartInfo $netsh, "wlan add filter permission=block ssid=`"$ssid`" networktype=infrastructure"
@@ -119,9 +121,9 @@ try {
     $children = @($cfg.Children)
     if ($children.Count -eq 0) { exit 0 }
 
-    # C#-koden kompileres bare én gang til PcWts.dll; senere kjøringer laster bare filen
+    # C#-koden kompileres bare én gang til PcWts2.dll; senere kjøringer laster bare filen
     # (å kompilere hvert minutt ville gitt et lite CPU-hopp hvert minutt).
-    $dll = Join-Path $Base 'PcWts.dll'
+    $dll = Join-Path $Base 'PcWts2.dll'
     if (-not ('PcWts' -as [type]) -and (Test-Path -LiteralPath $dll)) {
         try { Add-Type -LiteralPath $dll } catch { Remove-Item -LiteralPath $dll -Force -ErrorAction SilentlyContinue }
     }
@@ -160,6 +162,18 @@ public static class PcWts {
             if (user.Length > 0) res.Add(s.SessionId + "\t" + Query(s.SessionId, 7) + "\t" + user + "\t" + s.State);
         }
         WTSFreeMemory(p); return res.ToArray();
+    }
+    // 1 = låst, 0 = ulåst, -1 = ukjent (WTSSessionInfoEx, SessionFlags ligger på byte 12).
+    public static int Locked(int id) {
+        IntPtr b; int n;
+        if (!WTSQuerySessionInformationW(IntPtr.Zero, id, 25, out b, out n)) return -1;
+        try {
+            if (n < 16 || Marshal.ReadInt32(b, 0) != 1) return -1;
+            int flags = Marshal.ReadInt32(b, 12);
+            if (flags == 0) return 1;
+            if (flags == 1) return 0;
+            return -1;
+        } finally { WTSFreeMemory(b); }
     }
     public static void Send(int id, string title, string msg, int timeoutSec) {
         int r; WTSSendMessageW(IntPtr.Zero, id, title, title.Length * 2, msg, msg.Length * 2, 0x40, timeoutSec, out r, false);
@@ -220,11 +234,17 @@ public static class PcWts {
         if ($mine.Count -eq 0) { $st.Last = ''; continue }
 
         # Tell tid bare når økten er aktiv og ikke låst.
-        $active = @($mine | Where-Object { $_.State -eq 0 -and -not $locked.ContainsKey($_.Id) })
+        $active = @($mine | Where-Object {
+            if ($_.State -ne 0) { return $false }
+            $l = [PcWts]::Locked($_.Id)
+            if ($l -ge 0) { return ($l -eq 0) }
+            return -not $locked.ContainsKey($_.Id)   # reserve: påloggingsskjermen kjører i økten
+        })
         if ($active.Count -gt 0) {
             if ($st.Last) {
                 $delta = ($now - [datetime]::new([long]$st.Last)).TotalMinutes
                 if ($delta -gt 0 -and $delta -le 3) { $st.Minutes += $delta }
+                elseif ($delta -gt 3 -and $delta -le 15) { $st.Minutes += 1 }   # forsinket kjøring (travel PC): tell minst ett minutt
             }
             $st.Last = [string]$now.Ticks
         } else {

@@ -54,6 +54,8 @@ Gode vaner:
 - **Steam, Epic og lignende:** Er klienten tillatt for barnet, kan barnet hente gratisspill inne i den. Bruk Steam Family View / Epic sin foreldrekontroll i tillegg. Steam sin mappe er skrivbar for alle brukere, så skriptet sperrer den som standard.
 - **OneDrive** ligger i brukerens egen mappe og blir derfor sperret for barnet.
 - **Sikkermodus og oppstart fra USB** kan bare stoppes helt med BIOS/UEFI-passord, slått av USB-oppstart og BitLocker.
+- **Nye kontoer:** Legger du til en ny voksenkonto etter oppsettet, kjør meny 10 (Bruk alle innstillinger på nytt), ellers behandles den som et barn av app-sperren.
+- **Kjør som administrator** avvises automatisk for alle standardbrukere (ikke bare barnet) når det valget er på. Bruk administratorkontoen til endringer.
 - **Nettlesere uten regelstøtte** (for eksempel Opera) som en voksen har installert, bør sperres i meny 3.
 - **Nye nettverkskort sperret** (meny 4) kan også stoppe driveroppdateringer for nettverkskort. Slå det av midlertidig når du skal oppdatere drivere.
 
