@@ -149,6 +149,15 @@ function T([string]$Text) {
     return $out
 }
 
+function ConvertTo-MenuKey([string]$Text) {
+    # Menybokstaver tastet med ukrainsk (eller russisk) tastaturoppsett gir kyrilliske tegn på de
+    # samme tastene. Gjør dem om til latinske bokstaver, så H, L, G, S, X og M virker uansett oppsett.
+    $map = @{ 'р' = 'h'; 'д' = 'l'; 'п' = 'g'; 'і' = 's'; 'ы' = 's'; 'ч' = 'x'; 'ь' = 'm' }
+    $t = $Text.Trim().ToLowerInvariant()
+    if ($map.ContainsKey($t)) { return $map[$t] }
+    return $t
+}
+
 function Select-Language([hashtable]$Cfg) {
     Write-Host ''
     Write-Host '  Velg språk / Оберіть мову:' -ForegroundColor Cyan
@@ -157,7 +166,7 @@ function Select-Language([hashtable]$Cfg) {
     while ($true) {
         $a = (Read-Host '  1/2').Trim()
         $n = 0
-        if ([int]::TryParse($a, [ref]$n) -and $n -ge 1 -and $n -le $codes.Count) { break }
+        if ([int]::TryParse($a, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$n) -and $n -ge 1 -and $n -le $codes.Count) { break }
     }
     $Cfg.Language = $codes[$n - 1]
     Import-Language $Cfg.Language
@@ -182,7 +191,7 @@ function Read-YesNo([string]$Prompt, [bool]$Default = $true) {
     $y = T 'j'; $n = T 'n'
     $hint = if ($Default) { '[{0}/{1}]' -f $y.ToUpper(), $n } else { '[{0}/{1}]' -f $y, $n.ToUpper() }
     while ($true) {
-        $a = (Read-Host ((T $Prompt) + ' ' + $hint)).Trim().ToLower()
+        $a = (Read-Host ((T $Prompt) + ' ' + $hint)).Trim().ToLowerInvariant()
         if ($a -eq '') { return $Default }
         if ($a -in @('j', 'ja', 'y', 'yes', 'т', 'так')) { return $true }
         if ($a -in @('n', 'nei', 'no', 'н', 'ні')) { return $false }
@@ -220,7 +229,7 @@ function Read-Limit([string]$Prompt, $Default) {
         $a = Read-Text ((T $Prompt) + ' ' + (T "(minutter, 0 = ingen tilgang, '{0}' = ingen grense)" (T 'ingen'))) $d
         if (Test-NoLimitWord $a) { return -1 }
         $n = 0
-        if ([int]::TryParse($a, [ref]$n) -and $n -ge 0 -and $n -le 1440) { return $n }
+        if ([int]::TryParse($a, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$n) -and $n -ge 0 -and $n -le 1440) { return $n }
         Write-Warn "Skriv et tall mellom 0 og 1440, eller '{0}'." (T 'ingen')
     }
 }
@@ -807,7 +816,7 @@ function Show-UsageToday([hashtable]$Cfg) {
     if (Test-Path -LiteralPath $UsagePath) { try { $u = Get-Content -LiteralPath $UsagePath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { } }
     foreach ($c in $Cfg.Children) {
         $m = 0
-        if ($u -and $u.Date -eq (Get-Date).ToString('yyyy-MM-dd') -and $u.Users.($c.Sid)) { $m = [math]::Round([double]$u.Users.($c.Sid).Minutes) }
+        if ($u -and $u.Date -eq (Get-Date).ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture) -and $u.Users.($c.Sid)) { $m = [math]::Round([double]$u.Users.($c.Sid).Minutes) }
         Write-Info "{0}: {1} minutter brukt i dag" $($c.Name) $m
     }
 }
@@ -823,7 +832,7 @@ function Set-LogonHours([hashtable]$Cfg, [hashtable]$Child) {
         $order = @('Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday')
         $today = (Get-Date).DayOfWeek.ToString()
         $bonus = 0
-        if ($Cfg.Bonus -and $Cfg.Bonus.Date -eq (Get-Date).ToString('yyyy-MM-dd')) { $bonus = [int]$Cfg.Bonus.Minutes }
+        if ($Cfg.Bonus -and $Cfg.Bonus.Date -eq (Get-Date).ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)) { $bonus = [int]$Cfg.Bonus.Minutes }
         for ($d = 0; $d -lt 7; $d++) {
             $r = $Cfg.ScreenTime.Days[$order[$d]]
             $extra = if ($order[$d] -eq $today) { $bonus } else { 0 }
@@ -872,7 +881,7 @@ function Install-Files {
 function Register-EnforcerTask {
     $ps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
     $arg = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File &quot;$InstallDir\Haandhever.ps1&quot;"
-    $start = (Get-Date).Date.ToString('yyyy-MM-ddTHH:mm:ss')
+    $start = (Get-Date).Date.ToString("yyyy-MM-dd'T'HH:mm:ss", [Globalization.CultureInfo]::InvariantCulture)
     $xml = @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -913,12 +922,12 @@ function Apply-ScreenTime([hashtable]$Cfg) {
 
 function Menu-Bonus([hashtable]$Cfg) {
     Write-Title 'Gi ekstra tid i dag'
-    $today = (Get-Date).ToString('yyyy-MM-dd')
+    $today = (Get-Date).ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
     $have = if ($Cfg.Bonus.Date -eq $today) { [int]$Cfg.Bonus.Minutes } else { 0 }
     Write-Info "Ekstra tid gitt i dag: {0} minutter. Ekstra tid gjelder også etter siste klokkeslett." $have
     $n = 0
     $a = Read-Text 'Hvor mange minutter ekstra? (negativt tall trekker fra)' '30'
-    if (-not [int]::TryParse($a, [ref]$n)) { Write-Err 'Ikke et tall.'; return }
+    if (-not [int]::TryParse($a, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$n)) { Write-Err 'Ikke et tall.'; return }
     $Cfg.Bonus = @{ Date = $today; Minutes = [math]::Max(0, $have + $n) }
     Save-Config $Cfg
     # Påloggingstidene utvides også, så ekstra tid kan brukes etter en utlogging eller omstart.
@@ -1145,7 +1154,7 @@ function Menu-Apps([hashtable]$Cfg, [switch]$Wizard) {
         Write-Host (T '  Skriv numre for å bytte mellom tillatt/sperret (for eksempel 2,5,7-9).')
         Write-Host (T '  G = tillat alle spill, spillklienter og antijuks (anbefalt så spillene virker som de skal)')
         Write-Host (T '  S = bytt Store,  X = bytt Xbox-appen,  M = legg til mappe selv,  Enter = ferdig')
-        $a = (Read-Host (T 'Valg')).Trim()
+        $a = ConvertTo-MenuKey (Read-Host (T 'Valg'))
         if ($a -eq '') { break }
         if ($a -ieq 'g') { Enable-AllGames $Cfg $cands; continue }
         if ($a -ieq 's') { $Cfg.Apps.BlockStore = -not $Cfg.Apps.BlockStore; continue }
@@ -1942,7 +1951,7 @@ function Start-Main {
     if ($BrukPaaNytt) { Invoke-ApplyAll $cfg; return }
     while ($true) {
         Show-Menu
-        $c = (Read-Host ("`n" + (T '  Valg'))).Trim()
+        $c = ConvertTo-MenuKey (Read-Host ("`n" + (T '  Valg')))
         try {
             switch ($c) {
                 { $_ -ieq 'h' } { Invoke-Wizard $cfg; Wait-Key }

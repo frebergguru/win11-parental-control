@@ -4,7 +4,7 @@ Et interaktivt skript som setter opp foreldrekontroll på en Windows 11-PC med W
 
 > **English summary:** An interactive PowerShell script (menus in Norwegian or Ukrainian) that sets up parental control on Windows 11 using only built-in Windows features: a standard child account, screen time with warnings and automatic logoff, an app allowlist that blocks installing new apps and games (AppLocker on Pro/Education/Enterprise, Software Restriction Policies on Home), Wi-Fi network filters, a family DNS filter with forced SafeSearch and browser policies, and VPN/proxy blocking. Everything can be undone from the menu. The menus are available in Norwegian and Ukrainian ([README.uk.md](README.uk.md)). Run `Start-Foreldrekontroll.cmd` as an administrator. Licensed under MIT.
 
-Skriptet kan brukes på **norsk** eller **ukrainsk**. Språket velges første gang, og kan byttes med **L** i hovedmenyen. Українська версія цього посібника: [README.uk.md](README.uk.md).
+Skriptet kan brukes på **norsk** eller **ukrainsk**. Språket velges første gang, og kan byttes med **L** i hovedmenyen. Det ukrainske grensesnittet virker på norsk, engelsk og alle andre språkversjoner av Windows 11, og menybokstavene (H, L, G, S, X, M) kan også tastes med ukrainsk tastaturoppsett. Українська версія цього посібника: [README.uk.md](README.uk.md).
 
 ## Kom i gang
 
@@ -83,6 +83,7 @@ Logg så inn som voksen, velg **11** og kontroller med **9** at alt er borte.
 - `Start-Foreldrekontroll.cmd`: starter oppsettet som administrator
 - `lang/uk.psd1`: ukrainske tekster (norsk tekst er nøkkelen)
 - `tests/Test-Oversettelser.ps1`: sjekker at alle tekster er oversatt og at plassholderne stemmer
+- `tests/Test-Kulturer.ps1`: kjører det ukrainske grensesnittet med norsk, engelsk og ukrainsk Windows-kultur (formatering, ja/nei-svar og menybokstaver fra ukrainsk tastatur)
 
 ## Lisens
 

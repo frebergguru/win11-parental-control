@@ -187,7 +187,7 @@ public static class PcWts {
     }
 
     $now   = Get-Date
-    $today = $now.ToString('yyyy-MM-dd')
+    $today = $now.ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
 
     # Meldinger til barnet, på språket foreldrene valgte.
     $M = @{
