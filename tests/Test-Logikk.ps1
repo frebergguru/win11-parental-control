@@ -67,16 +67,20 @@ $cfg = Get-DefaultConfig
 Check 'Get-PrefixSsids: 3 skrivemåter x 59 tall = 177 enkeltnavn' (@(Get-PrefixSsids $cfg).Count) 177
 Check 'Get-PrefixSsids har Anlegg1, Anlegg50, ANLEGG3, anlegg7, Anlegg01' (@('Anlegg1', 'Anlegg50', 'ANLEGG3', 'anlegg7', 'Anlegg01' | Where-Object { @(Get-PrefixSsids $cfg) -ccontains $_ }).Count) 5
 Check 'Get-UniqueSsids uten navn gir tom liste' (@(Get-UniqueSsids).Count) 0
+foreach ($n in 'Anlegg3', 'ANLEGG3', 'Anlegg 3', 'Anlegg-3', 'Anlegg_3', 'Anlegg3-5G', 'Anlegg3 Gjest', 'Anlegg01') { Check "mønster: $n er Anlegg" (Test-PrefixSsid $cfg $n) $true }
+foreach ($n in 'Anlegg', 'AnleggX', 'MinAnlegg5', 'Anleggsplass', 'Hjemme') { Check "mønster: $n er ikke Anlegg" (Test-PrefixSsid $cfg $n) $false }
+Check 'filtersjekk: "Anlegg1-5G" teller ikke som Anlegg1' (Test-WlanFilterPresent 'SSID: "Anlegg1-5G", Type: x' 'Anlegg1') $false
+Check 'filtersjekk: "Anlegg1" finnes' (Test-WlanFilterPresent 'SSID: "Anlegg1", Type: x' 'Anlegg1') $true
 
 # 1. Standard (Wi-Fi-filter av): Anlegg1-50 + synlige Anlegg77 og anlegg3 sperres
-$script:visible = @('Hjemme', 'Anlegg77', 'anlegg3', 'AnleggX', 'MinAnlegg5')
+$script:visible = @('Hjemme', 'Anlegg77', 'anlegg3', 'AnleggX', 'MinAnlegg5', 'Anlegg5-5G')
 Apply-Wifi $cfg
-$want = @(Get-UniqueSsids $anlegg 'Anlegg77')
+$want = @(Get-UniqueSsids $anlegg 'Anlegg77' 'Anlegg5-5G')
 Check 'av: nøyaktig Anlegg1-50 + synlige Anlegg-navn sperret' ((Get-Blocked) -join ',') ($want -join ',')
 Check 'av: AnleggX og MinAnlegg5 ikke sperret' ((Get-Blocked) -ccontains 'AnleggX' -or (Get-Blocked) -ccontains 'MinAnlegg5') $false
 Check 'av: ingen tillat-filtre eller sperr-alt' (@(Get-Allowed).Count + [int]$script:filters.Contains('denyall|infrastructure')) 0
 Check 'av: lagret liste er flat (bare tekst)' (@($cfg.Wifi.AppliedPrefixSsids | Where-Object { $_ -isnot [string] }).Count) 0
-Check 'av: lagret liste har 178 navn' (@($cfg.Wifi.AppliedPrefixSsids).Count) 178
+Check 'av: lagret liste har 179 navn' (@($cfg.Wifi.AppliedPrefixSsids).Count) 179
 
 # 2. Ny kjøring uten endring: ingen netsh-endringer
 $script:calls = 0
@@ -124,8 +128,17 @@ $lastAdd = -1; for ($i = 0; $i -lt $script:ops.Count; $i++) { if ($script:ops[$i
 Check 'tillat til sperr: alt nytt lagt inn før sperr-alt fjernes' ($iDeny -gt $lastAdd -and $iDeny -ge 0) $true
 Check 'sperr: ingen tillat-filtre, ingen sperr-alt' (@(Get-Allowed).Count + [int]$script:filters.Contains('denyall|infrastructure')) 0
 # Anlegg-sperrene (også Anlegg77 og Anlegg120 som håndheveren fant) står gjennom tillat-modus.
-$wantB = @(Get-UniqueSsids $anlegg 'Anlegg77' 'Anlegg120' 'Nabo')
+$wantB = @(Get-UniqueSsids $anlegg 'Anlegg77' 'Anlegg5-5G' 'Anlegg120' 'Nabo')
 Check 'sperr: Nabo + Anlegg-navn sperret' ((Get-Blocked) -join ',') ($wantB -join ',')
+
+# 7b. Sperret "Anlegg1-5G" i egen liste skjuler ikke at Anlegg1-filteret er borte
+$cfg.Wifi.Ssids = @('Nabo', 'Anlegg7', 'Anlegg1-5G')
+Apply-Wifi $cfg
+[void]$script:filters.Remove('block|Anlegg1')
+Apply-Wifi $cfg
+Check 'Anlegg1 lagt inn igjen selv om Anlegg1-5G er sperret' ((Get-Blocked) -ccontains 'Anlegg1') $true
+$cfg.Wifi.Ssids = @('Nabo', 'Anlegg7')
+Apply-Wifi $cfg
 
 # 8. Prefiks av ("ingen"): Anlegg-sperrene fjernes, Nabo og Anlegg7 (valgt selv) blir
 $cfg.Wifi.BlockPrefixes = @()
@@ -140,6 +153,9 @@ $cfg2.Wifi.AppliedPrefixSsids = @(, @('Anlegg1', 'Anlegg2'))
 Apply-Wifi $cfg2
 Check 'nestet liste: ingen sammenslåtte navn' (@(Get-Blocked | Where-Object { $_ -match ' ' }).Count) 0
 Check 'nestet liste: alle Anlegg-navn sperret' (@(Get-Blocked | Where-Object { $anlegg -ccontains $_ }).Count) 177
+Apply-Wifi $cfg2 -Remove
+$script:filters.Clear(); $cfg.Wifi.AppliedPrefixSsids = @(); $cfg.Wifi.AppliedSsids = @(); $cfg.Wifi.AppliedMode = 'off'
+Apply-Wifi $cfg
 
 # 10. Skadet tilstandsfil: tas vare på som .feil, sperrene virker
 '{ halv' | Set-Content -LiteralPath $WifiStatePath
@@ -147,11 +163,19 @@ Apply-Wifi $cfg
 Check 'skadet tilstandsfil: lagt til side' (Test-Path -LiteralPath "$WifiStatePath.feil") $true
 Check 'skadet tilstandsfil: sperrene står' (@(Get-Blocked | Where-Object { $anlegg -ccontains $_ }).Count) 177
 
-# 11. Fjern alt: ingen filtre igjen, også et sperrefilter uten bokføring (Anlegg999)
+# 11. Prefiks endret fra Anlegg til Site: gamle Anlegg-filtre (også et uten bokføring) ryddes
+[void]$script:filters.Add('block|Anlegg88')
+$cfg.Wifi.BlockPrefixes = @('Site')
+Apply-Wifi $cfg
+Check 'prefiks endret: ingen Anlegg-filtre igjen' (@(Get-Blocked | Where-Object { $_ -match '(?i)^anlegg' -and $_ -cne 'Anlegg7' }).Count) 0
+Check 'prefiks endret: Site1 sperret' ((Get-Blocked) -ccontains 'Site1') $true
+$cfg.Wifi.BlockPrefixes = @('Anlegg')
+Apply-Wifi $cfg
+
+# 12. Fjern alt (én gang): ingen filtre igjen, også et sperrefilter uten bokføring (Anlegg999)
 [void]$script:filters.Add('block|Anlegg999')
 Apply-Wifi $cfg -Remove
-Apply-Wifi $cfg2 -Remove
-Check 'fjern: ingen filtre igjen' $script:filters.Count 0
+Check 'fjern: ingen filtre igjen' (@($script:filters) -join ',') ''
 
 [Console]::WriteLine('== AppLocker-ID-er ==')
 $c = Get-DefaultConfig; $c.Apps.Enabled = $true

@@ -305,7 +305,7 @@ function Get-DefaultConfig {
         Wifi       = @{
             Mode = 'off'; Ssids = @(); BlockNewAdapters = $false; DisableBtPan = $true; AppliedMode = 'off'; AppliedSsids = @()
             # Nettverk med disse navnene pluss et tall (Anlegg1, Anlegg2, ...) er alltid sperret.
-            BlockPrefixes = @('Anlegg'); PrefixMax = 50; AppliedPrefixSsids = @()
+            BlockPrefixes = @('Anlegg'); PrefixMax = 50; AppliedPrefixSsids = @(); PrefixHistory = @()
         }
         Web        = @{ Enabled = $false; Provider = 'cleanbrowsing'; Servers = @(); BrowserPolicies = $true; BlockPublicDns = $true; DohAdded = @() }
         Vpn        = @{ Enabled = $false; DisableBuiltin = $true; BlockPorts = $true; HideSettings = $true }
@@ -1581,9 +1581,17 @@ function Get-PrefixSsids([hashtable]$Cfg) {
     return $res
 }
 
-function Test-PrefixSsid([hashtable]$Cfg, [string]$Ssid) {
-    foreach ($p in @($Cfg.Wifi.BlockPrefixes | Where-Object { $_ })) {
-        if ($Ssid -match ('^(?i)' + [regex]::Escape($p) + '\d+$')) { return $true }
+function Get-PrefixPattern([string]$Prefix) {
+    # Prefiks + tall, også med mellomrom, bindestrek eller understrek og et tillegg etter tallet:
+    # Anlegg3, ANLEGG3, Anlegg 3, Anlegg-3, Anlegg3-5G, Anlegg3 Gjest. (Samme mønster i Haandhever.ps1.)
+    return ('^(?i)' + [regex]::Escape($Prefix) + '[\s_-]*\d+([\s_-].*)?$')
+}
+
+function Test-PrefixSsid([hashtable]$Cfg, [string]$Ssid, [switch]$History) {
+    $list = @($Cfg.Wifi.BlockPrefixes | Where-Object { $_ })
+    if ($History) { $list += @($Cfg.Wifi.PrefixHistory | Where-Object { $_ }) }
+    foreach ($p in $list) {
+        if ($Ssid -match (Get-PrefixPattern $p)) { return $true }
     }
     return $false
 }
@@ -1611,9 +1619,9 @@ function Get-WlanFilterText {
 }
 
 function Test-WlanFilterPresent([string]$FilterText, [string]$Ssid) {
-    # Ser etter nettverksnavnet som eget ord i "netsh wlan show filters" (virker på alle språk;
-    # "Anlegg1" treffer ikke "Anlegg10").
-    return ($FilterText -cmatch ('(?<![\w])' + [regex]::Escape($Ssid) + '(?![\w])'))
+    # Ser etter akkurat dette navnet i anførselstegn i "netsh wlan show filters" (virker på alle språk;
+    # "Anlegg1" treffer verken "Anlegg10" eller "Anlegg1-5G").
+    return ($FilterText -cmatch ('"' + [regex]::Escape($Ssid) + '"'))
 }
 
 function Get-WifiModeTexts {
@@ -1747,26 +1755,33 @@ function Apply-Wifi([hashtable]$Cfg, [switch]$Remove) {
     # ---- 2. Fjern det som ikke lenger skal være der. Et "tillat"-filter fjernes aldri mens "sperr
     # alt annet" er på uten at det nye allerede er lagt inn (ellers kunne nettet falt ut midt i et spill).
     if ($oldMode -eq 'allow' -or $oldMode -eq 'block') {
+        # Fra "bare tillatte": fjern "sperr alt annet" FØR tillat-filtrene, ellers mister PC-en nettet
+        # et øyeblikk. Anlegg-sperrene er allerede på plass.
+        if ($oldMode -eq 'allow' -and $mode -ne 'allow') { [void](Invoke-Native $netsh 'wlan delete filter permission=denyall networktype=infrastructure') }
         foreach ($s in $oldList) {
             $stillWanted = ($oldMode -eq $mode -and $newList -ccontains $s) -or ($operm -eq 'block' -and $wantPrefix -ccontains $s)
             if (-not $stillWanted) { Remove-WlanFilter $operm $s }
         }
-        if ($oldMode -eq 'allow' -and $mode -ne 'allow') { [void](Invoke-Native $netsh 'wlan delete filter permission=denyall networktype=infrastructure') }
         if ($mode -eq 'off') { [void](Invoke-Native $netsh 'wlan delete filter permission=denyall networktype=adhoc') }
     }
     foreach ($s in $have) {
         if ($wantPrefix -cnotcontains $s -and -not ($mode -eq 'block' -and $newList -ccontains $s)) { Remove-WlanFilter 'block' $s }
     }
-    if (-not $usePrefix) {
-        # Rydd også sperrefiltre som ikke står i bokføringen (for eksempel lagt inn av håndheveren i
-        # samme øyeblikk som en tidligere opprydding).
-        foreach ($m in [regex]::Matches($present, '"([^"]+)"')) {
-            $s = $m.Groups[1].Value
-            if ((Test-PrefixSsid $Cfg $s) -and $have -cnotcontains $s -and -not ($mode -eq 'block' -and $newList -ccontains $s)) { Remove-WlanFilter 'block' $s }
+    # Rydd sperrefiltre for alltid sperrede navn som ikke lenger skal være der, også de som ikke står i
+    # bokføringen (for eksempel fra et prefiks som er endret, eller en skadet tilstandsfil).
+    foreach ($m in [regex]::Matches($present, '"([^"]+)"')) {
+        $s = $m.Groups[1].Value
+        if ($wantPrefix -ccontains $s -or $have -ccontains $s -or ($mode -eq 'block' -and $newList -ccontains $s)) { continue }
+        if ($mode -eq 'allow' -and $newList -ccontains $s) { continue }
+        if (Test-PrefixSsid $Cfg $s -History) {
+            if (-not $usePrefix -or -not (Test-PrefixSsid $Cfg $s)) { Remove-WlanFilter 'block' $s }
         }
     }
+    $Cfg.Wifi.PrefixHistory = @(Get-UniqueSsids @($Cfg.Wifi.PrefixHistory) @($Cfg.Wifi.BlockPrefixes))
     $Cfg.Wifi.AppliedMode = $mode; $Cfg.Wifi.AppliedSsids = @($newList)
     $Cfg.Wifi.AppliedPrefixSsids = @($wantPrefix)
+    # Lagre med en gang, så bokføringen på disk alltid stemmer med filtrene selv om noe senere feiler.
+    Save-Config $Cfg
     if ($stateOk -and (Test-Path -LiteralPath $stateCopy)) { Remove-Item -LiteralPath $stateCopy -Force }
 
     if ($mode -ne 'off') {
@@ -1786,6 +1801,9 @@ function Apply-Wifi([hashtable]$Cfg, [switch]$Remove) {
         foreach ($p in ($saved | Where-Object { Test-PrefixSsid $Cfg $_.Ssid })) {
             [void](Invoke-Native $netsh "wlan delete profile name=`"$($p.Profile)`"")
         }
+        # Er PC-en koblet til et alltid sperret nettverk, kobles den fra (filteret stopper bare nye tilkoblinger).
+        $cur = Get-CurrentSsid
+        if ($cur -and (Test-PrefixSsid $Cfg $cur) -and -not ($mode -eq 'allow' -and $newList -ccontains $cur)) { [void](Invoke-Native $netsh 'wlan disconnect') }
         Write-Ok "Alltid sperret: {0}" $(Format-Prefixes $Cfg)
         # Håndheveren sperrer høyere tall (for eksempel Anlegg51) når de dukker opp.
         if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) { Install-Files; Register-EnforcerTask }
@@ -2310,7 +2328,7 @@ function Invoke-RemoveAll([hashtable]$Cfg) {
         }
     }
     Save-Config $Cfg
-    foreach ($f in @('dns-reparert.json', 'applocker.xml', 'applocker.new.xml', 'usage.json', 'wifi-sperret.json', 'etter-oppdatering.log', 'etter-oppdatering.log.old')) {
+    foreach ($f in @('dns-reparert.json', 'applocker.xml', 'applocker.new.xml', 'usage.json', 'wifi-sperret.json', 'wifi-sperret.json.lest', 'wifi-sperret.json.feil', 'wifi-sperret.json.tmp', 'etter-oppdatering.log', 'etter-oppdatering.log.old')) {
         Remove-Item -LiteralPath (Join-Path $InstallDir $f) -Force -ErrorAction SilentlyContinue
     }
     Get-ChildItem -LiteralPath $InstallDir -Filter 'PcWts*.dll' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue

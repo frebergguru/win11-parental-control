@@ -125,18 +125,23 @@ try {
                 $mi = [regex]::Match((Invoke-Netsh 'wlan show interfaces'), '(?m)^\s+SSID\s+:\s(.+?)\s*$')
                 if ($mi.Success) { $current = $mi.Groups[1].Value }
                 $candidates = @([regex]::Matches($out, '(?m)^SSID \d+\s*:\s*(.*?)\s*$') | ForEach-Object { $_.Groups[1].Value })
+                # Fra Windows 11 24H2 kan listen være tom hvis posisjonstjenester er av. Skriv det i loggen (én gang i timen).
+                if ($candidates.Count -eq 0 -and $out.Trim() -and (Get-Date).Minute -eq 0) { Write-PcLog "Kunne ikke lese Wi-Fi-nettverk i nærheten: $($out.Trim())" }
                 if ($current) { $candidates += $current }
                 $added = $false
                 foreach ($ssid in $candidates) {
                     if (-not $ssid) { continue }
                     $match = $false
-                    foreach ($p in $prefixes) { if ($ssid -match ('^' + [regex]::Escape($p) + '\d+$')) { $match = $true; break } }
+                    # Samme mønster som Get-PrefixPattern i oppsettet: Anlegg3, Anlegg 3, Anlegg-3, Anlegg3-5G ...
+                    foreach ($p in $prefixes) { if ($ssid -match ('^(?i)' + [regex]::Escape($p) + '[\s_-]*\d+([\s_-].*)?$')) { $match = $true; break } }
                     if (-not $match) { continue }
+                    # Koblet til et sperret nettverk: koble fra (filteret stopper bare nye tilkoblinger).
+                    if ($current -ceq $ssid) { [void](Invoke-Netsh 'wlan disconnect') }
                     # Wi-Fi-navn skiller mellom store og små bokstaver; filteret må finnes for akkurat dette navnet.
-                    if ($filters -cmatch ('(?<![\w])' + [regex]::Escape($ssid) + '(?![\w])')) { continue }
+                    if ($filters -cmatch ('"' + [regex]::Escape($ssid) + '"')) { continue }
                     [void](Invoke-Netsh "wlan add filter permission=block ssid=`"$ssid`" networktype=infrastructure")
                     [void](Invoke-Netsh "wlan delete profile name=`"$ssid`"")
-                    if ($current -ceq $ssid) { [void](Invoke-Netsh 'wlan disconnect') }
+                    if ($current -ceq $ssid) { [void](Invoke-Netsh 'wlan disconnect') }   # igjen, nå som profilen er borte
                     $filters += "`n`"$ssid`""
                     if ($state -cnotcontains $ssid) { $state += $ssid }
                     $added = $true
@@ -145,7 +150,7 @@ try {
                 if ($added) {
                     $tmp = "$WifiStatePath.tmp"
                     ConvertTo-Json -InputObject @($state) | Set-Content -LiteralPath $tmp -Encoding UTF8
-                    Move-Item -LiteralPath $tmp -Destination $WifiStatePath -Force
+                    if (Test-Path -LiteralPath $WifiStatePath) { [IO.File]::Replace($tmp, $WifiStatePath, [NullString]::Value) } else { [IO.File]::Move($tmp, $WifiStatePath) }
                 }
             }
         } catch { Write-PcLog "Wi-Fi-sjekk feilet: $($_.Exception.Message)" }
