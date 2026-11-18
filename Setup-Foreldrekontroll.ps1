@@ -1567,10 +1567,16 @@ function Get-CurrentSsid {
 }
 
 function Get-PrefixSsids([hashtable]$Cfg) {
-    # Navn som sperres på forhånd: hvert prefiks med tallene 1 til PrefixMax.
+    # Navn som sperres på forhånd. Wi-Fi-filtre skiller mellom store og små bokstaver, så hvert
+    # prefiks sperres slik det er skrevet, med STORE og små bokstaver og med stor forbokstav, med
+    # tallene 1 til PrefixMax og 01 til 09. Høyere tall sperres av håndheveren når de dukker opp.
+    $numbers = @(1..[int]$Cfg.Wifi.PrefixMax | ForEach-Object { [string]$_ }) + @(1..9 | ForEach-Object { '0' + $_ })
     $res = @()
     foreach ($p in @($Cfg.Wifi.BlockPrefixes | Where-Object { $_ })) {
-        for ($i = 1; $i -le [int]$Cfg.Wifi.PrefixMax; $i++) { $res += "$p$i" }
+        $title = $p.Substring(0, 1).ToUpperInvariant() + $p.Substring(1).ToLowerInvariant()
+        foreach ($v in (Get-UniqueSsids $p $p.ToUpperInvariant() $p.ToLowerInvariant() $title)) {
+            foreach ($n in $numbers) { $res += "$v$n" }
+        }
     }
     return $res
 }
@@ -1596,6 +1602,7 @@ function Get-UniqueSsids {
     foreach ($x in @($args | ForEach-Object { $_ } | ForEach-Object { $_ })) {
         if ($x -and $set.Add([string]$x)) { [void]$res.Add([string]$x) }
     }
+    if ($res.Count -eq 0) { return }
     return [string[]]($res | Sort-Object -CaseSensitive)
 }
 
@@ -1635,7 +1642,7 @@ function Menu-Wifi([hashtable]$Cfg) {
         Write-Info 'Skriv "{0}" for å ikke sperre noen navn automatisk.' (T 'ingen')
         $a = Read-Text 'Navn' ((@($Cfg.Wifi.BlockPrefixes) -join ', '))
         if (Test-NoLimitWord $a) { $Cfg.Wifi.BlockPrefixes = @() }
-        else { $Cfg.Wifi.BlockPrefixes = @($a -split '\s*,\s*' | Where-Object { $_ } | Sort-Object -Unique) }
+        else { $Cfg.Wifi.BlockPrefixes = @(Get-UniqueSsids @($a -split '\s*,\s*')) }
     }
     elseif ($choice -in @('1', '2')) {
         $saved = Get-SavedSsids
@@ -1658,7 +1665,13 @@ function Menu-Wifi([hashtable]$Cfg) {
             $sel += $extra
         }
         if ($choice -eq '1') {
-            if ($current -and $sel -notcontains $current) {
+            # Alltid sperrede navn (Anlegg1 ...) kan aldri tillates.
+            $refused = @($sel | Where-Object { Test-PrefixSsid $Cfg $_ })
+            if ($refused.Count) {
+                Write-Warn 'Disse nettverkene er alltid sperret og kan ikke tillates: {0}' ($refused -join ', ')
+                $sel = @($sel | Where-Object { -not (Test-PrefixSsid $Cfg $_) })
+            }
+            if ($current -and $sel -notcontains $current -and -not (Test-PrefixSsid $Cfg $current)) {
                 Write-Warn "Nettverket du er koblet til nå ('{0}') er ikke valgt. PC-en mister nettet." $current
                 if (Read-YesNo (T "Ta med '{0}'?" $current) $true) { $sel += $current }
             }
@@ -1679,80 +1692,95 @@ function Apply-Wifi([hashtable]$Cfg, [switch]$Remove) {
     $netsh = "$env:windir\System32\netsh.exe"
     $mode = if ($Remove) { 'off' } else { $Cfg.Wifi.Mode }
     $oldMode = [string]$Cfg.Wifi.AppliedMode
-    $oldList = @($Cfg.Wifi.AppliedSsids | Where-Object { $_ })
-    $newList = if ($mode -eq 'off') { @() } else { @($Cfg.Wifi.Ssids | Where-Object { $_ }) }
+    $oldList = @($Cfg.Wifi.AppliedSsids | ForEach-Object { $_ } | Where-Object { $_ })
+    $newList = if ($mode -eq 'off') { @() } else { @($Cfg.Wifi.Ssids | ForEach-Object { $_ } | Where-Object { $_ }) }
+    # Alltid sperrede navn kan aldri stå i tillat-listen.
+    if ($mode -eq 'allow') { $newList = @($newList | Where-Object { -not (Test-PrefixSsid $Cfg $_) }) }
+    $perm = if ($mode -eq 'allow') { 'allow' } else { 'block' }
+    $operm = if ($oldMode -eq 'allow') { 'allow' } else { 'block' }
     # Det Windows faktisk har (en oppdatering kan ha fjernet filtre som bokføringen sier finnes).
     $present = Get-WlanFilterText
     function Add-WlanFilter([string]$Perm, [string]$Ssid) {
         $r = Invoke-Native $netsh "wlan add filter permission=$Perm ssid=`"$Ssid`" networktype=infrastructure"
         if ($r.ExitCode -ne 0) { Write-Warn "Wi-Fi-filter for '{0}' feilet: {1}" $Ssid $($r.Output.Trim()) }
     }
-    # Endre bare det som er annerledes. Å fjerne et "tillat"-filter mens "sperr alt annet" er på,
-    # ville koblet PC-en fra nettet et øyeblikk (og kastet barnet ut av et nettspill).
-    if ($oldMode -eq $mode -and $mode -ne 'off') {
-        $perm = if ($mode -eq 'allow') { 'allow' } else { 'block' }
-        foreach ($s in $newList) { if ($oldList -cnotcontains $s -or -not (Test-WlanFilterPresent $present $s)) { Add-WlanFilter $perm $s } }
-        # "Sperr alt annet" skal alltid finnes i disse modusene (å legge det til igjen er ufarlig).
-        if ($mode -eq 'allow') { [void](Invoke-Native $netsh 'wlan add filter permission=denyall networktype=infrastructure') }
-        [void](Invoke-Native $netsh 'wlan add filter permission=denyall networktype=adhoc')
-        foreach ($s in $oldList) { if ($newList -cnotcontains $s) { [void](Invoke-Native $netsh "wlan delete filter permission=$perm ssid=`"$s`" networktype=infrastructure") } }
-    } else {
-        # Ny modus: legg til de nye filtrene først, fjern de gamle etterpå.
-        if ($mode -ne 'off') {
-            $perm = if ($mode -eq 'allow') { 'allow' } else { 'block' }
-            foreach ($s in $newList) { Add-WlanFilter $perm $s }
-            if ($mode -eq 'allow') { [void](Invoke-Native $netsh 'wlan add filter permission=denyall networktype=infrastructure') }
-            [void](Invoke-Native $netsh 'wlan add filter permission=denyall networktype=adhoc')
-        }
-        if ($oldMode -eq 'allow' -or $oldMode -eq 'block') {
-            $operm = if ($oldMode -eq 'allow') { 'allow' } else { 'block' }
-            foreach ($s in $oldList) { [void](Invoke-Native $netsh "wlan delete filter permission=$operm ssid=`"$s`" networktype=infrastructure") }
-            if ($oldMode -eq 'allow') { [void](Invoke-Native $netsh 'wlan delete filter permission=denyall networktype=infrastructure') }
-            if ($mode -eq 'off') { [void](Invoke-Native $netsh 'wlan delete filter permission=denyall networktype=adhoc') }
-        }
-    }
-    $Cfg.Wifi.AppliedMode = $mode; $Cfg.Wifi.AppliedSsids = @($newList)
-
-    if ($mode -ne 'off') {
-        if ($mode -eq 'block') {
-            $saved = Get-SavedSsids
-            foreach ($p in ($saved | Where-Object { $Cfg.Wifi.Ssids -ccontains $_.Ssid })) {
-                [void](Invoke-Native $netsh "wlan delete profile name=`"$($p.Profile)`"")
-            }
-        }
-        if ($mode -eq 'allow') { Write-Ok 'Wi-Fi-filter: bare {0}' (@($Cfg.Wifi.Ssids) -join ', ') }
-        else { Write-Ok 'Wi-Fi-filter: sperret: {0}' (@($Cfg.Wifi.Ssids) -join ', ') }
-    } else {
-        Write-Ok 'Wi-Fi-filteret er av.'
+    function Remove-WlanFilter([string]$Perm, [string]$Ssid) {
+        [void](Invoke-Native $netsh "wlan delete filter permission=$Perm ssid=`"$Ssid`" networktype=infrastructure")
     }
 
-    # Alltid sperrede navn (Anlegg1, Anlegg2, ...). I "bare tillatte"-modus er de allerede sperret,
-    # med mindre en voksen har tillatt et av dem med vilje.
-    $oldPrefix = @($Cfg.Wifi.AppliedPrefixSsids | Where-Object { $_ })
+    # ---- Navn håndheveren har sperret. Filen får nytt navn før den leses, så navn som legges til
+    # imens ikke går tapt. Er den skadet, beholdes den som .feil.
     $byEnforcer = @()
-    # Gi tilstandsfilen et nytt navn før den leses, så navn håndheveren legger til imens ikke går tapt.
     $stateCopy = "$WifiStatePath.lest"
+    $stateOk = $true
     if (Test-Path -LiteralPath $WifiStatePath) {
-        try {
-            Move-Item -LiteralPath $WifiStatePath -Destination $stateCopy -Force
-            $byEnforcer = @(Get-Content -LiteralPath $stateCopy -Raw -Encoding UTF8 | ConvertFrom-Json | ForEach-Object { $_ } | ForEach-Object { $_ })
-        } catch { }
+        try { Move-Item -LiteralPath $WifiStatePath -Destination $stateCopy -Force } catch { }
+    }
+    if (Test-Path -LiteralPath $stateCopy) {
+        try { $byEnforcer = @(Get-Content -LiteralPath $stateCopy -Raw -Encoding UTF8 | ConvertFrom-Json | ForEach-Object { $_ } | ForEach-Object { $_ } | Where-Object { $_ }) }
+        catch { $stateOk = $false; Move-Item -LiteralPath $stateCopy -Destination "$WifiStatePath.feil" -Force -ErrorAction SilentlyContinue }
     }
     # Pakk ut nestede lister fra eldre versjoner.
-    $oldPrefix = @($oldPrefix | ForEach-Object { $_ } | ForEach-Object { $_ } | Where-Object { $_ })
-    $wantPrefix = @()
+    $oldPrefix = @($Cfg.Wifi.AppliedPrefixSsids | ForEach-Object { $_ } | ForEach-Object { $_ } | Where-Object { $_ })
+
+    # ---- Alltid sperrede navn (Anlegg1, Anlegg2, ...): sperret i alle moduser, også "bare tillatte",
+    # så de er sperret selv om "sperr alt annet" skulle forsvinne. Navn i en egen sperreliste står der allerede.
     $usePrefix = (-not $Remove) -and @($Cfg.Wifi.BlockPrefixes | Where-Object { $_ }).Count
-    if ($usePrefix -and $mode -ne 'allow') {
-        # I "bare tillatte"-modus er navnene allerede sperret av "sperr alt annet". I "sperr"-modus står
-        # navn som også er i sperrelisten, allerede der.
+    $wantPrefix = @()
+    if ($usePrefix) {
         $wantPrefix = @(Get-UniqueSsids @(Get-PrefixSsids $Cfg) @(Get-VisibleSsids | Where-Object { Test-PrefixSsid $Cfg $_ }) @(@($byEnforcer) + @($oldPrefix) | Where-Object { Test-PrefixSsid $Cfg $_ }) |
             Where-Object { -not ($mode -eq 'block' -and $newList -ccontains $_) })
     }
     $have = @(Get-UniqueSsids $oldPrefix $byEnforcer)
-    foreach ($s in $wantPrefix) { if ($have -cnotcontains $s -or -not (Test-WlanFilterPresent $present $s)) { [void](Invoke-Native $netsh "wlan add filter permission=block ssid=`"$s`" networktype=infrastructure") } }
-    foreach ($s in $have) { if ($wantPrefix -cnotcontains $s -and -not ($mode -eq 'block' -and $newList -ccontains $s)) { [void](Invoke-Native $netsh "wlan delete filter permission=block ssid=`"$s`" networktype=infrastructure") } }
+
+    # ---- 1. Legg til alt nytt FØRST, så det aldri er et øyeblikk uten sperre.
+    foreach ($s in $wantPrefix) { if ($have -cnotcontains $s -or -not (Test-WlanFilterPresent $present $s)) { Add-WlanFilter 'block' $s } }
+    if ($mode -ne 'off') {
+        foreach ($s in $newList) {
+            if ($oldMode -ne $mode -or $oldList -cnotcontains $s -or -not (Test-WlanFilterPresent $present $s)) { Add-WlanFilter $perm $s }
+        }
+        # "Sperr alt annet" skal alltid finnes i disse modusene (å legge det til igjen er ufarlig).
+        if ($mode -eq 'allow') { [void](Invoke-Native $netsh 'wlan add filter permission=denyall networktype=infrastructure') }
+        [void](Invoke-Native $netsh 'wlan add filter permission=denyall networktype=adhoc')
+    }
+
+    # ---- 2. Fjern det som ikke lenger skal være der. Et "tillat"-filter fjernes aldri mens "sperr
+    # alt annet" er på uten at det nye allerede er lagt inn (ellers kunne nettet falt ut midt i et spill).
+    if ($oldMode -eq 'allow' -or $oldMode -eq 'block') {
+        foreach ($s in $oldList) {
+            $stillWanted = ($oldMode -eq $mode -and $newList -ccontains $s) -or ($operm -eq 'block' -and $wantPrefix -ccontains $s)
+            if (-not $stillWanted) { Remove-WlanFilter $operm $s }
+        }
+        if ($oldMode -eq 'allow' -and $mode -ne 'allow') { [void](Invoke-Native $netsh 'wlan delete filter permission=denyall networktype=infrastructure') }
+        if ($mode -eq 'off') { [void](Invoke-Native $netsh 'wlan delete filter permission=denyall networktype=adhoc') }
+    }
+    foreach ($s in $have) {
+        if ($wantPrefix -cnotcontains $s -and -not ($mode -eq 'block' -and $newList -ccontains $s)) { Remove-WlanFilter 'block' $s }
+    }
+    if (-not $usePrefix) {
+        # Rydd også sperrefiltre som ikke står i bokføringen (for eksempel lagt inn av håndheveren i
+        # samme øyeblikk som en tidligere opprydding).
+        foreach ($m in [regex]::Matches($present, '"([^"]+)"')) {
+            $s = $m.Groups[1].Value
+            if ((Test-PrefixSsid $Cfg $s) -and $have -cnotcontains $s -and -not ($mode -eq 'block' -and $newList -ccontains $s)) { Remove-WlanFilter 'block' $s }
+        }
+    }
+    $Cfg.Wifi.AppliedMode = $mode; $Cfg.Wifi.AppliedSsids = @($newList)
     $Cfg.Wifi.AppliedPrefixSsids = @($wantPrefix)
-    if (Test-Path -LiteralPath $stateCopy) { Remove-Item -LiteralPath $stateCopy -Force }
+    if ($stateOk -and (Test-Path -LiteralPath $stateCopy)) { Remove-Item -LiteralPath $stateCopy -Force }
+
+    if ($mode -ne 'off') {
+        if ($mode -eq 'block') {
+            $saved = Get-SavedSsids
+            foreach ($p in ($saved | Where-Object { $newList -ccontains $_.Ssid })) {
+                [void](Invoke-Native $netsh "wlan delete profile name=`"$($p.Profile)`"")
+            }
+        }
+        if ($mode -eq 'allow') { Write-Ok 'Wi-Fi-filter: bare {0}' ($newList -join ', ') }
+        else { Write-Ok 'Wi-Fi-filter: sperret: {0}' ($newList -join ', ') }
+    } else {
+        Write-Ok 'Wi-Fi-filteret er av.'
+    }
     if ($usePrefix) {
         $saved = Get-SavedSsids
         foreach ($p in ($saved | Where-Object { Test-PrefixSsid $Cfg $_.Ssid })) {
@@ -2028,9 +2056,13 @@ function Get-MissingProtections([hashtable]$Cfg) {
     # Wi-Fi-filtre: de valgte nettverkene og det første navnet for hvert alltid sperrede prefiks.
     if (Test-HasWifi) {
         $ft = Get-WlanFilterText
+        # Alle navn som skal ha filter: valgte nettverk og alle alltid sperrede navn.
         $need = @()
-        if ($Cfg.Wifi.Mode -in @('allow', 'block')) { $need += @($Cfg.Wifi.Ssids | Where-Object { $_ }) }
-        if ($Cfg.Wifi.Mode -ne 'allow') { $need += @($Cfg.Wifi.BlockPrefixes | Where-Object { $_ } | ForEach-Object { "${_}1" }) }
+        if ($Cfg.Wifi.Mode -in @('allow', 'block')) { $need += @($Cfg.Wifi.AppliedSsids | ForEach-Object { $_ } | Where-Object { $_ }) }
+        if (@($Cfg.Wifi.BlockPrefixes | Where-Object { $_ }).Count) {
+            $need += @(Get-PrefixSsids $Cfg)
+            $need += @($Cfg.Wifi.AppliedPrefixSsids | ForEach-Object { $_ } | ForEach-Object { $_ } | Where-Object { $_ })
+        }
         if (@($need | Where-Object { -not (Test-WlanFilterPresent $ft $_) }).Count) { $missing += (T 'Wi-Fi-filtre') }
     }
     if ($Cfg.Vpn.Enabled -and $Cfg.Vpn.DisableBuiltin) {
@@ -2099,6 +2131,9 @@ function Invoke-AutoReapply([hashtable]$Cfg) {
     } catch { }
     try {
         $today = (Get-Date).ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
+        # "Sperr alt annet" i tillat-modus kan ikke leses sikkert på alle språk, så det legges bare inn
+        # igjen ved hver sjekk (ufarlig hvis det finnes).
+        if ($Cfg.Wifi.AppliedMode -eq 'allow') { [void](Invoke-Native "$env:windir\System32\netsh.exe" 'wlan add filter permission=denyall networktype=infrastructure') }
         $build = Get-WindowsBuild
         $Cfg.AutoReapply.LastCheck = (Get-Date).ToString('yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture)
         $reason = $null
@@ -2232,6 +2267,7 @@ function Invoke-RemoveAll([hashtable]$Cfg) {
     if (-not (Read-YesNo 'Er du sikker på at du vil fjerne alle sperrene?' $false)) { return }
     $steps = @(
         @{ N = 'Oppgave';    S = {
+            Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
             Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
             Stop-ScheduledTask -TaskName $UpdateTaskName -ErrorAction SilentlyContinue
             Unregister-ScheduledTask -TaskName $UpdateTaskName -Confirm:$false -ErrorAction SilentlyContinue
@@ -2256,7 +2292,7 @@ function Invoke-RemoveAll([hashtable]$Cfg) {
     foreach ($k in @($Cfg.Backup.Registry.Keys)) { $p = $k.Split('|'); Restore-ManagedHklm $Cfg $p[0] $p[1] }
     foreach ($s in @($Cfg.Backup.Services.Keys)) { Set-ManagedService $Cfg $s $false }
     $Cfg.ScreenTime.Enabled = $false; $Cfg.Web.Enabled = $false; $Cfg.Vpn.Enabled = $false
-    $Cfg.Wifi.Mode = 'off'; $Cfg.Extra.TimeZone = $false; $Cfg.Extra.WinRE = $false; $Cfg.Extra.RegEdit = $false
+    $Cfg.Wifi.Mode = 'off'; $Cfg.Wifi.Ssids = @(); $Cfg.Extra.TimeZone = $false; $Cfg.Extra.WinRE = $false; $Cfg.Extra.RegEdit = $false
     Save-Config $Cfg
     if ((Test-IsHomeEdition) -and @($Cfg.Children).Count) {
         $gone = @($Cfg.Backup.StoreRemovedFor | Sort-Object -Unique)

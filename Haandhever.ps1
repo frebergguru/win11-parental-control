@@ -97,35 +97,57 @@ try {
     }
 
     # ------------------------------------- Alltid sperrede Wi-Fi-navn (Anlegg1, Anlegg2, ...)
-    # Skriptet sperrer navn + 1 til PrefixMax på forhånd. Her sperres høyere tall som dukker opp.
+    # Skriptet sperrer navnene på forhånd. Her sperres navn som dukker opp og ikke allerede har filter
+    # (for eksempel Anlegg51), og "sperr alt annet" legges inn igjen i "bare tillatte"-modus.
     $prefixes = @($cfg.Wifi.BlockPrefixes | Where-Object { $_ })
     # Hvert femte minutt holder (leser bare listen Windows allerede har, starter ikke et nytt søk).
-    if ($cfg.Wifi -and $cfg.Wifi.Mode -ne 'allow' -and $prefixes.Count -gt 0 -and ((Get-Date).Minute % 5 -eq 0)) {
+    if ($cfg.Wifi -and ((Get-Date).Minute % 5 -eq 0) -and ($prefixes.Count -gt 0 -or $cfg.Wifi.AppliedMode -eq 'allow')) {
         try {
             $netsh = "$env:windir\System32\netsh.exe"
-            # Pakk ut nestede lister (eldre versjoner kunne lagre hele navnelisten som ett element).
-            $known = @(@($cfg.Wifi.AppliedPrefixSsids) + @($cfg.Wifi.Ssids) | ForEach-Object { $_ } | ForEach-Object { $_ } | Where-Object { $_ })
-            $state = @()
-            # ForEach-Object pakker ut lista (ConvertFrom-Json i PowerShell 5.1 gir hele lista som ett objekt).
-            if (Test-Path -LiteralPath $WifiStatePath) { $state = @(Get-Content -LiteralPath $WifiStatePath -Raw -Encoding UTF8 | ConvertFrom-Json | ForEach-Object { $_ }) }
-            $out = (& $netsh wlan show networks mode=ssid) -join "`n"
-            $added = $false
-            foreach ($m in [regex]::Matches($out, '(?m)^SSID \d+\s*:\s*(.*?)\s*$')) {
-                $ssid = $m.Groups[1].Value
-                # Wi-Fi-navn skiller mellom store og små bokstaver, så sammenligningen må gjøre det også.
-                if (-not $ssid -or $known -ccontains $ssid -or $state -ccontains $ssid) { continue }
-                foreach ($p in $prefixes) {
-                    if ($ssid -match ('^' + [regex]::Escape($p) + '\d+$')) {
-                        $psi = New-Object Diagnostics.ProcessStartInfo $netsh, "wlan add filter permission=block ssid=`"$ssid`" networktype=infrastructure"
-                        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
-                        $proc = [Diagnostics.Process]::Start($psi); $proc.WaitForExit()
-                        $state += $ssid; $added = $true
-                        Write-PcLog "Wi-Fi '$ssid' sperret automatisk"
-                        break
-                    }
+            function Invoke-Netsh([string]$Arguments) {
+                $psi = New-Object Diagnostics.ProcessStartInfo $netsh, $Arguments
+                $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardOutput = $true
+                try { $psi.StandardOutputEncoding = [Text.Encoding]::GetEncoding([int](Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Nls\CodePage').OEMCP) } catch { }
+                $proc = [Diagnostics.Process]::Start($psi); $o = $proc.StandardOutput.ReadToEnd(); $proc.WaitForExit()
+                return $o
+            }
+            if ($cfg.Wifi.AppliedMode -eq 'allow') { [void](Invoke-Netsh 'wlan add filter permission=denyall networktype=infrastructure') }
+            if ($prefixes.Count -gt 0) {
+                $filters = Invoke-Netsh 'wlan show filters'
+                $state = @()
+                if (Test-Path -LiteralPath $WifiStatePath) {
+                    # Skadet fil: begynn på nytt i stedet for å stoppe sjekken for godt.
+                    try { $state = @(Get-Content -LiteralPath $WifiStatePath -Raw -Encoding UTF8 | ConvertFrom-Json | ForEach-Object { $_ } | ForEach-Object { $_ } | Where-Object { $_ }) }
+                    catch { Move-Item -LiteralPath $WifiStatePath -Destination "$WifiStatePath.feil" -Force -ErrorAction SilentlyContinue; $state = @() }
+                }
+                $out = Invoke-Netsh 'wlan show networks mode=ssid'
+                $current = ''
+                $mi = [regex]::Match((Invoke-Netsh 'wlan show interfaces'), '(?m)^\s+SSID\s+:\s(.+?)\s*$')
+                if ($mi.Success) { $current = $mi.Groups[1].Value }
+                $candidates = @([regex]::Matches($out, '(?m)^SSID \d+\s*:\s*(.*?)\s*$') | ForEach-Object { $_.Groups[1].Value })
+                if ($current) { $candidates += $current }
+                $added = $false
+                foreach ($ssid in $candidates) {
+                    if (-not $ssid) { continue }
+                    $match = $false
+                    foreach ($p in $prefixes) { if ($ssid -match ('^' + [regex]::Escape($p) + '\d+$')) { $match = $true; break } }
+                    if (-not $match) { continue }
+                    # Wi-Fi-navn skiller mellom store og små bokstaver; filteret må finnes for akkurat dette navnet.
+                    if ($filters -cmatch ('(?<![\w])' + [regex]::Escape($ssid) + '(?![\w])')) { continue }
+                    [void](Invoke-Netsh "wlan add filter permission=block ssid=`"$ssid`" networktype=infrastructure")
+                    [void](Invoke-Netsh "wlan delete profile name=`"$ssid`"")
+                    if ($current -ceq $ssid) { [void](Invoke-Netsh 'wlan disconnect') }
+                    $filters += "`n`"$ssid`""
+                    if ($state -cnotcontains $ssid) { $state += $ssid }
+                    $added = $true
+                    Write-PcLog "Wi-Fi '$ssid' sperret automatisk"
+                }
+                if ($added) {
+                    $tmp = "$WifiStatePath.tmp"
+                    ConvertTo-Json -InputObject @($state) | Set-Content -LiteralPath $tmp -Encoding UTF8
+                    Move-Item -LiteralPath $tmp -Destination $WifiStatePath -Force
                 }
             }
-            if ($added) { ConvertTo-Json -InputObject @($state) | Set-Content -LiteralPath $WifiStatePath -Encoding UTF8 }
         } catch { Write-PcLog "Wi-Fi-sjekk feilet: $($_.Exception.Message)" }
     }
 

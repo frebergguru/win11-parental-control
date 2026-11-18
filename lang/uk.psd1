@@ -79,6 +79,7 @@
     'Brukernavn for barnet (for eksempel emma)' = 'Ім''я користувача для дитини (наприклад, emma)'
     'Dag' = 'День'
     'Det skjer ofte når posisjonstjenester er slått av i personverninnstillingene i Windows.' = 'Так часто буває, коли служби визначення розташування вимкнено в параметрах конфіденційності Windows.'
+    'Disse nettverkene er alltid sperret og kan ikke tillates: {0}' = 'Ці мережі завжди заблоковано, тому їх не можна дозволити: {0}'
     'DNS på ''{0}'': {1}' = 'DNS на «{0}»: {1}'
     'DNS-filter, Wi-Fi-filter og VPN-sperre gjelder hele PC-en, også voksne.' = 'Фільтр DNS, фільтр Wi-Fi і блокування VPN діють на весь комп''ютер, зокрема й на дорослих.'
     'Du kjører ikke som medlem av Administratorer-gruppen direkte.' = 'Ви не є безпосереднім членом групи «Адміністратори».'
