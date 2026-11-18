@@ -24,6 +24,7 @@ $ErrorActionPreference = 'Stop'
 $InstallDir  = "$env:ProgramFiles\Foreldrekontroll"
 $ConfigPath  = "$InstallDir\config.json"
 $UsagePath   = "$InstallDir\usage.json"
+$WifiStatePath = "$InstallDir\wifi-sperret.json"
 $TaskName    = 'Foreldrekontroll'
 $FwGroup     = 'Foreldrekontroll'
 $SidUsers    = 'S-1-5-32-545'
@@ -210,7 +211,11 @@ function Get-DefaultConfig {
             Enabled = $false; AllowPaths = @(); DenyPaths = @(); DenyPackages = @()
             BlockStore = $true; BlockXbox = $true; BlockTools = $true; StrictUac = $true
         }
-        Wifi       = @{ Mode = 'off'; Ssids = @(); BlockNewAdapters = $false; DisableBtPan = $true; AppliedMode = 'off'; AppliedSsids = @() }
+        Wifi       = @{
+            Mode = 'off'; Ssids = @(); BlockNewAdapters = $false; DisableBtPan = $true; AppliedMode = 'off'; AppliedSsids = @()
+            # Nettverk med disse navnene pluss et tall (Anlegg1, Anlegg2, ...) er alltid sperret.
+            BlockPrefixes = @('Anlegg'); PrefixMax = 50; AppliedPrefixSsids = @()
+        }
         Web        = @{ Enabled = $false; Provider = 'cleanbrowsing'; Servers = @(); BrowserPolicies = $true; BlockPublicDns = $true; DohAdded = @() }
         Vpn        = @{ Enabled = $false; DisableBuiltin = $true; BlockPorts = $true; HideSettings = $true }
         Extra      = @{ TimeZone = $false; WinRE = $false; RegEdit = $true }
@@ -1189,19 +1194,50 @@ function Get-CurrentSsid {
     return ''
 }
 
+function Get-PrefixSsids([hashtable]$Cfg) {
+    # Navn som sperres på forhånd: hvert prefiks med tallene 1 til PrefixMax.
+    $res = @()
+    foreach ($p in @($Cfg.Wifi.BlockPrefixes | Where-Object { $_ })) {
+        for ($i = 1; $i -le [int]$Cfg.Wifi.PrefixMax; $i++) { $res += "$p$i" }
+    }
+    return , $res
+}
+
+function Test-PrefixSsid([hashtable]$Cfg, [string]$Ssid) {
+    foreach ($p in @($Cfg.Wifi.BlockPrefixes | Where-Object { $_ })) {
+        if ($Ssid -match ('^(?i)' + [regex]::Escape($p) + '\d+$')) { return $true }
+    }
+    return $false
+}
+
+function Format-Prefixes([hashtable]$Cfg) {
+    $p = @($Cfg.Wifi.BlockPrefixes | Where-Object { $_ })
+    if ($p.Count -eq 0) { return 'ingen' }
+    return (($p | ForEach-Object { "${_}1, ${_}2, ${_}3 ..." }) -join '; ')
+}
+
 function Menu-Wifi([hashtable]$Cfg) {
     Write-Title 'Trådløse nettverk'
     if (-not (Test-HasWifi)) { Write-Warn 'Fant ingen Wi-Fi på denne PC-en.' }
     Write-Info 'Filteret gjelder hele PC-en (også voksne), men bare administratorer kan endre det.'
     $modeTxt = @{ off = 'av'; allow = 'bare valgte nettverk er tillatt'; block = 'valgte nettverk er sperret' }
     Write-Info "Nå: $($modeTxt[$Cfg.Wifi.Mode]) $(if (@($Cfg.Wifi.Ssids).Count) { '(' + (@($Cfg.Wifi.Ssids) -join ', ') + ')' })"
+    Write-Info "Alltid sperret (navn pluss tall): $(Format-Prefixes $Cfg)"
     Write-Host ''
     Write-Host '  1. Bare tillat nettverk jeg velger (anbefalt: hjemme, skole, besteforeldre)'
     Write-Host '  2. Sperr bestemte nettverk'
-    Write-Host '  3. Slå av Wi-Fi-filteret'
+    Write-Host '  3. Slå av Wi-Fi-filteret (alltid sperrede navn er fortsatt sperret)'
+    Write-Host '  4. Endre navn som alltid er sperret'
     Write-Host '  0. Ingen endring'
     $choice = Read-Host 'Valg'
     if ($choice -eq '3') { $Cfg.Wifi.Mode = 'off'; $Cfg.Wifi.Ssids = @() }
+    elseif ($choice -eq '4') {
+        Write-Info 'Skriv navn uten tall, skilt med komma. "Anlegg" sperrer Anlegg1, Anlegg2 og så videre.'
+        Write-Info 'Skriv "ingen" for å ikke sperre noen navn automatisk.'
+        $a = Read-Text 'Navn' ((@($Cfg.Wifi.BlockPrefixes) -join ', '))
+        if ($a -ieq 'ingen') { $Cfg.Wifi.BlockPrefixes = @() }
+        else { $Cfg.Wifi.BlockPrefixes = @($a -split '\s*,\s*' | Where-Object { $_ } | Sort-Object -Unique) }
+    }
     elseif ($choice -in @('1', '2')) {
         $saved = Get-SavedSsids
         $names = @(@($saved | ForEach-Object { $_.Ssid }) + (Get-VisibleSsids) + @($Cfg.Wifi.Ssids) | Where-Object { $_ } | Sort-Object -Unique)
@@ -1245,6 +1281,16 @@ function Apply-Wifi([hashtable]$Cfg, [switch]$Remove) {
     if ($Cfg.Wifi.AppliedMode -eq 'allow') { [void](Invoke-Native $netsh 'wlan delete filter permission=denyall networktype=infrastructure') }
     if ($Cfg.Wifi.AppliedMode -ne 'off') { [void](Invoke-Native $netsh 'wlan delete filter permission=denyall networktype=adhoc') }
     $Cfg.Wifi.AppliedMode = 'off'; $Cfg.Wifi.AppliedSsids = @()
+    # Fjern også de alltid sperrede navnene (fra skriptet og fra håndheveren).
+    $old = @($Cfg.Wifi.AppliedPrefixSsids)
+    if (Test-Path -LiteralPath $WifiStatePath) {
+        try { $old += @(Get-Content -LiteralPath $WifiStatePath -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { }
+        Remove-Item -LiteralPath $WifiStatePath -Force
+    }
+    foreach ($s in ($old | Where-Object { $_ } | Sort-Object -Unique)) {
+        [void](Invoke-Native $netsh "wlan delete filter permission=block ssid=`"$s`" networktype=infrastructure")
+    }
+    $Cfg.Wifi.AppliedPrefixSsids = @()
 
     $mode = if ($Remove) { 'off' } else { $Cfg.Wifi.Mode }
     if ($mode -ne 'off') {
@@ -1264,6 +1310,26 @@ function Apply-Wifi([hashtable]$Cfg, [switch]$Remove) {
         Write-Ok "Wi-Fi-filter: $(if ($mode -eq 'allow') {'bare'} else {'sperret:'}) $(@($Cfg.Wifi.Ssids) -join ', ')"
     } else {
         Write-Ok 'Wi-Fi-filteret er av.'
+    }
+
+    # Alltid sperrede navn (Anlegg1, Anlegg2, ...). I "bare tillatte"-modus er de allerede sperret,
+    # med mindre en voksen har tillatt et av dem med vilje.
+    if (-not $Remove -and @($Cfg.Wifi.BlockPrefixes | Where-Object { $_ }).Count) {
+        $names = @(Get-PrefixSsids $Cfg) + @(Get-VisibleSsids | Where-Object { Test-PrefixSsid $Cfg $_ })
+        $names = @($names | Sort-Object -Unique | Where-Object { $Cfg.Wifi.Mode -ne 'allow' -or $Cfg.Wifi.Ssids -notcontains $_ })
+        if ($mode -ne 'allow') {
+            foreach ($s in $names) {
+                if ($mode -eq 'block' -and $Cfg.Wifi.Ssids -contains $s) { continue }
+                [void](Invoke-Native $netsh "wlan add filter permission=block ssid=`"$s`" networktype=infrastructure")
+            }
+            $Cfg.Wifi.AppliedPrefixSsids = @($names | Where-Object { -not ($mode -eq 'block' -and $Cfg.Wifi.Ssids -contains $_) })
+        }
+        foreach ($p in (Get-SavedSsids | Where-Object { (Test-PrefixSsid $Cfg $_.Ssid) -and $names -contains $_.Ssid })) {
+            [void](Invoke-Native $netsh "wlan delete profile name=`"$($p.Profile)`"")
+        }
+        Write-Ok "Alltid sperret: $(Format-Prefixes $Cfg)"
+        # Håndheveren sperrer høyere tall (for eksempel Anlegg51) når de dukker opp.
+        if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) { Install-Files; Register-EnforcerTask }
     }
 
     # Nye nettverkskort (USB-deling fra mobil, USB-Wi-Fi).
@@ -1487,6 +1553,7 @@ function Show-Status([hashtable]$Cfg) {
 
     Write-Host "`n  Trådløse nettverk" -ForegroundColor White
     Write-Info "Modus: $($Cfg.Wifi.Mode) $(@($Cfg.Wifi.Ssids) -join ', ')"
+    Write-Info "Alltid sperret: $(Format-Prefixes $Cfg)"
     $f = Invoke-Native "$env:windir\System32\netsh.exe" 'wlan show filters'
     foreach ($l in ($f.Output -split "`r?`n" | Where-Object { $_.Trim() })) { Write-Info $l.TrimEnd() }
 

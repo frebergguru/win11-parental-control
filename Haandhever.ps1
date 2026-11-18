@@ -17,6 +17,7 @@ $Base       = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ConfigPath = Join-Path $Base 'config.json'
 $UsagePath  = Join-Path $Base 'usage.json'
 $LogPath    = Join-Path $Base 'haandhever.log'
+$WifiStatePath = Join-Path $Base 'wifi-sperret.json'
 
 function Write-PcLog([string]$Text) {
     try {
@@ -55,6 +56,35 @@ try {
                 }
             } catch { }
         }
+    }
+
+    # ------------------------------------- Alltid sperrede Wi-Fi-navn (Anlegg1, Anlegg2, ...)
+    # Skriptet sperrer navn + 1 til PrefixMax på forhånd. Her sperres høyere tall som dukker opp.
+    $prefixes = @($cfg.Wifi.BlockPrefixes | Where-Object { $_ })
+    if ($cfg.Wifi -and $cfg.Wifi.Mode -ne 'allow' -and $prefixes.Count -gt 0) {
+        try {
+            $netsh = "$env:windir\System32\netsh.exe"
+            $known = @($cfg.Wifi.AppliedPrefixSsids) + @($cfg.Wifi.Ssids)
+            $state = @()
+            if (Test-Path -LiteralPath $WifiStatePath) { $state = @(Get-Content -LiteralPath $WifiStatePath -Raw -Encoding UTF8 | ConvertFrom-Json) }
+            $out = (& $netsh wlan show networks mode=ssid) -join "`n"
+            $added = $false
+            foreach ($m in [regex]::Matches($out, '(?m)^SSID \d+\s*:\s*(.*?)\s*$')) {
+                $ssid = $m.Groups[1].Value
+                if (-not $ssid -or $known -contains $ssid -or $state -contains $ssid) { continue }
+                foreach ($p in $prefixes) {
+                    if ($ssid -match ('^' + [regex]::Escape($p) + '\d+$')) {
+                        $psi = New-Object Diagnostics.ProcessStartInfo $netsh, "wlan add filter permission=block ssid=`"$ssid`" networktype=infrastructure"
+                        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+                        $proc = [Diagnostics.Process]::Start($psi); $proc.WaitForExit()
+                        $state += $ssid; $added = $true
+                        Write-PcLog "Wi-Fi '$ssid' sperret automatisk"
+                        break
+                    }
+                }
+            }
+            if ($added) { ConvertTo-Json -InputObject @($state) | Set-Content -LiteralPath $WifiStatePath -Encoding UTF8 }
+        } catch { Write-PcLog "Wi-Fi-sjekk feilet: $($_.Exception.Message)" }
     }
 
     # ----------------------------------------------------------- Skjermtid
