@@ -28,6 +28,7 @@ $InstallDir  = "$env:ProgramFiles\Foreldrekontroll"
 $ConfigPath  = "$InstallDir\config.json"
 $UsagePath   = "$InstallDir\usage.json"
 $WifiStatePath = "$InstallDir\wifi-sperret.json"
+$AppVersion  = '1.0.0'
 $TaskName    = 'Foreldrekontroll'
 $UpdateTaskName = 'Foreldrekontroll etter oppdatering'
 $FwGroup     = 'Foreldrekontroll'
@@ -2355,7 +2356,7 @@ function Invoke-Wizard([hashtable]$Cfg) {
 
 function Show-Menu {
     Write-Host ''
-    Write-Host (T '  FORELDREKONTROLL FOR WINDOWS 11') -ForegroundColor Cyan
+    Write-Host ((T '  FORELDREKONTROLL FOR WINDOWS 11') + "  v$AppVersion") -ForegroundColor Cyan
     Write-Host ''
     Write-Host (T '   H. Hurtigoppsett (anbefalt første gang)')
     Write-Host (T '   1. Barnekontoer')
