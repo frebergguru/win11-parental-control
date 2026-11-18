@@ -38,6 +38,11 @@ foreach ($cmd in $ast.FindAll({ $args[0] -is [System.Management.Automation.Langu
         $problems += "Linje $($arg.Extent.StartLineNumber): tekst med `$variabel kan ikke oversettes: $($arg.Extent.Text)"
     }
 }
+# throw med ren tekst (ikke via T) blir aldri oversatt.
+foreach ($t in $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.ThrowStatementAst] }, $true)) {
+    $e = $t.Pipeline.Extent.Text
+    if ($e -match '^\s*["'']' -and $e -match '\p{L}{3,}') { $problems += "Linje $($t.Extent.StartLineNumber): throw uten T(): $e" }
+}
 # Tekster som sendes til T via variabler eller tabeller.
 foreach ($a in $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
     $left = $a.Left.Extent.Text

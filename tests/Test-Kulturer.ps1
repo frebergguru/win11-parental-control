@@ -39,4 +39,10 @@ $script:answers = New-Object System.Collections.Queue
 foreach ($a in 'т', 'Т', 'так', 'ТАК', 'н', 'Н', 'ні', 'j', 'n', 'y') { $script:answers.Enqueue($a) }
 $want = @($true, $true, $true, $true, $false, $false, $false, $true, $false, $true)
 for ($i = 0; $i -lt $want.Count; $i++) { Check "ja/nei svar $i" (Read-YesNo 'Slå på skjermtid?' $false) $want[$i] }
+# I det norske grensesnittet skal kyrillisk 'т' (N-tasten på ukrainsk tastatur) ikke bety ja:
+# svaret avvises, og neste svar ('n') gjelder.
+Import-Language 'nb'
+$script:answers.Clear(); $script:answers.Enqueue('т'); $script:answers.Enqueue('n')
+function Write-Warn { }
+Check 'nb: т avvist, n = nei' (Read-YesNo 'Er du sikker på at du vil fjerne alle sperrene?' $true) $false
 if ($fail) { Write-Host "$fail feil" -ForegroundColor Red; exit 1 } else { Write-Host 'OK' -ForegroundColor Green }

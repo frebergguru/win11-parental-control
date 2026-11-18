@@ -108,7 +108,8 @@ $LauncherPattern = '(?i)steam|epic games|EpicGamesLauncher|\bEA app\b|EA Desktop
 $GameServiceDirs = @(
     '%ProgramFiles(x86)%\Epic Games\Epic Online Services', '%ProgramFiles(x86)%\EasyAntiCheat_EOS',
     '%ProgramFiles(x86)%\EasyAntiCheat', '%ProgramFiles(x86)%\Common Files\BattlEye',
-    '%ProgramFiles%\EA\AC', '%ProgramFiles%\Common Files\EAInstaller', '%ProgramFiles(x86)%\Common Files\Steam'
+    '%ProgramFiles%\EA\AC', '%ProgramFiles%\Common Files\EAInstaller', '%ProgramFiles(x86)%\Common Files\Steam',
+    '%ProgramData%\Battle.net\Agent'
 )
 
 $StorePackages = @('Microsoft.WindowsStore', 'Microsoft.DesktopAppInstaller', 'Microsoft.StorePurchaseApp')
@@ -189,12 +190,16 @@ function Wait-Key { [void](Read-Host ("`n" + (T 'Trykk Enter for å fortsette'))
 
 function Read-YesNo([string]$Prompt, [bool]$Default = $true) {
     $y = T 'j'; $n = T 'n'
-    $hint = if ($Default) { '[{0}/{1}]' -f $y.ToUpper(), $n } else { '[{0}/{1}]' -f $y, $n.ToUpper() }
+    $hint = if ($Default) { '[{0}/{1}]' -f $y.ToUpperInvariant(), $n } else { '[{0}/{1}]' -f $y, $n.ToUpperInvariant() }
     while ($true) {
         $a = (Read-Host ((T $Prompt) + ' ' + $hint)).Trim().ToLowerInvariant()
         if ($a -eq '') { return $Default }
-        if ($a -in @('j', 'ja', 'y', 'yes', 'т', 'так')) { return $true }
-        if ($a -in @('n', 'nei', 'no', 'н', 'ні')) { return $false }
+        # Kyrilliske svar godtas bare i det ukrainske grensesnittet. Med ukrainsk tastatur gir N-tasten
+        # 'т' (ja), så i det norske grensesnittet kunne et "nei" ellers blitt et "ja".
+        $yes = @('j', 'ja', 'y', 'yes'); $no = @('n', 'nei', 'no')
+        if ($script:Lang -eq 'uk') { $yes += @('т', 'так'); $no += @('н', 'ні') }
+        if ($a -in $yes) { return $true }
+        if ($a -in $no) { return $false }
         Write-Warn 'Svar j eller n.'
     }
 }
@@ -389,7 +394,11 @@ function Invoke-Native([string]$Exe, [string]$Arguments) {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.CreateNoWindow = $true
-    try { $psi.StandardOutputEncoding = [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage) } catch { }
+    # Konsollprogrammer skriver med systemets OEM-tegnsett (systemlokalet), ikke brukerens formatvalg.
+    try {
+        $oem = [int](Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Nls\CodePage' -ErrorAction Stop).OEMCP
+        $psi.StandardOutputEncoding = [Text.Encoding]::GetEncoding($oem)
+    } catch { }
     $p = [Diagnostics.Process]::Start($psi)
     $out = $p.StandardOutput.ReadToEnd()
     $err = $p.StandardError.ReadToEnd()
@@ -575,7 +584,9 @@ function Set-ChildSrp([string]$Root, [hashtable]$Cfg, [string[]]$WritableDirs) {
     }
     $allow = @($env:windir, $env:ProgramFiles, ${env:ProgramFiles(x86)}) + @($Cfg.Apps.AllowPaths)
     foreach ($a in ($allow | Where-Object { $_ } | Sort-Object -Unique)) { Add-Path '262144' $a 'Foreldrekontroll: tillatt' }
-    $deny = @($WritableDirs) + @($Cfg.Apps.DenyPaths)
+    # Skrivbare mapper som en voksen har tillatt (for eksempel spill i Steam), skal ikke sperres:
+    # i SRP vinner sperren når to regler er like spesifikke, og undermapper er mer spesifikke.
+    $deny = @($WritableDirs | Where-Object { -not (Test-UnderAny $_ @($Cfg.Apps.AllowPaths)) }) + @($Cfg.Apps.DenyPaths)
     if ($Cfg.Apps.BlockTools) { foreach ($t in $ChildDeniedTools) { $deny += @(Expand-AppLockerPath $t) } }
     foreach ($d in ($deny | Where-Object { $_ } | Sort-Object -Unique)) { Add-Path '0' ($d.TrimEnd('*').TrimEnd('\')) 'Foreldrekontroll: sperret' }
 }
@@ -860,7 +871,7 @@ function Set-LogonHours([hashtable]$Cfg, [hashtable]$Child) {
 function Install-Files {
     if (-not (Test-Path -LiteralPath $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null }
     $here = Split-Path -Parent $PSCommandPath
-    foreach ($f in @('Haandhever.ps1', 'Setup-Foreldrekontroll.ps1', 'Start-Foreldrekontroll.cmd', 'README.md')) {
+    foreach ($f in @('Haandhever.ps1', 'Setup-Foreldrekontroll.ps1', 'Start-Foreldrekontroll.cmd', 'README.md', 'README.uk.md', 'LICENSE')) {
         $src = Join-Path $here $f
         $dst = Join-Path $InstallDir $f
         if ((Test-Path -LiteralPath $src) -and ($src -ne $dst)) { Copy-Item -LiteralPath $src -Destination $dst -Force }
@@ -871,10 +882,10 @@ function Install-Files {
         New-Item -ItemType Directory -Path $langDst -Force | Out-Null
         Copy-Item -Path (Join-Path $langSrc '*.psd1') -Destination $langDst -Force
     }
-    # Håndheveren kompilerer PcWts.dll på nytt neste gang (i tilfelle koden er endret).
-    Remove-Item -LiteralPath (Join-Path $InstallDir 'PcWts2.dll') -Force -ErrorAction SilentlyContinue
+    # Håndheveren kompilerer PcWts3.dll på nytt neste gang (i tilfelle koden er endret).
+    Remove-Item -LiteralPath (Join-Path $InstallDir 'PcWts3.dll') -Force -ErrorAction SilentlyContinue
     if (-not (Test-Path -LiteralPath (Join-Path $InstallDir 'Haandhever.ps1'))) {
-        throw "Fant ikke Haandhever.ps1. Den må ligge i samme mappe som dette skriptet."
+        throw (T 'Fant ikke Haandhever.ps1. Den må ligge i samme mappe som dette skriptet.')
     }
 }
 
@@ -1037,7 +1048,7 @@ function Get-AppCandidates([string[]]$WritableDirs) {
     # Steam (selve klienten trengs for å starte Steam-spill)
     $steam = Get-PcReg 'HKLM:\SOFTWARE\WOW6432Node\Valve\Steam' 'InstallPath'
     if ($steam -and (Test-Path -LiteralPath $steam)) {
-        Add-Cand 'Steam (klient og alle Steam-spill)' $steam 'Spillklient'
+        Add-Cand (T 'Steam (klient og alle Steam-spill)') $steam 'Spillklient'
         $libs = @($steam)
         $vdf = Join-Path $steam 'steamapps\libraryfolders.vdf'
         if (Test-Path -LiteralPath $vdf) {
@@ -1071,7 +1082,7 @@ function Get-AppCandidates([string[]]$WritableDirs) {
     # Antijuks og spilltjenester som spillene starter i barnets økt
     foreach ($d in $GameServiceDirs) {
         $full = [Environment]::ExpandEnvironmentVariables($d)
-        Add-Cand "Spilltjeneste: $(Split-Path -Leaf $full)" $full 'Spilltjeneste'
+        Add-Cand (T 'Spilltjeneste: {0}' (Split-Path -Leaf $full)) $full 'Spilltjeneste'
     }
     $order = @{ Spill = 0; Spillklient = 1; Spilltjeneste = 2; Program = 3 }
     $list = @($found.Values | Sort-Object @{ Expression = { $order[$_.Kind] } }, Name)
@@ -1143,7 +1154,7 @@ function Menu-Apps([hashtable]$Cfg, [switch]$Wizard) {
         }
         for ($i = 0; $i -lt $rows.Count; $i++) {
             $r = $rows[$i]
-            $mark = if ($r.Ok) { (T 'tillatt').ToUpper().PadRight(14) } else { (T 'sperret').ToUpper().PadRight(14) }
+            $mark = if ($r.Ok) { (T 'tillatt').ToUpperInvariant().PadRight(14) } else { (T 'sperret').ToUpperInvariant().PadRight(14) }
             $col = if ($r.Ok) { 'Green' } else { 'Red' }
             Write-Host ("  {0,3}. " -f ($i + 1)) -NoNewline
             Write-Host $mark -ForegroundColor $col -NoNewline
@@ -1370,8 +1381,8 @@ function Apply-Apps([hashtable]$Cfg, [string[]]$Writable = $null) {
 # ============================================================== 4. Trådløse nettverk
 
 function Test-HasWifi {
-    $r = Invoke-Native "$env:windir\System32\netsh.exe" 'wlan show interfaces'
-    return ($r.ExitCode -eq 0 -and $r.Output -match '(?m)^\s+SSID\s')
+    # Fra nettverkskortene, ikke netsh (netsh viser lite når kortet er frakoblet eller posisjon er av).
+    return [bool](Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.PhysicalMediaType -match '802\.11' -or $_.NdisPhysicalMedium -eq 9 })
 }
 
 function Get-VisibleSsids {
@@ -1796,7 +1807,7 @@ function Show-Status([hashtable]$Cfg) {
     else {
         try {
             $pol = Get-AppLockerPolicy -Effective
-            foreach ($rc in $pol.RuleCollections) { Write-Info ("{0,-7} {1,-14} {2} regler" -f $rc.RuleCollectionType, $rc.EnforcementMode, @($rc).Count) }
+            foreach ($rc in $pol.RuleCollections) { Write-Info '{0}: {1}, regler: {2}' $rc.RuleCollectionType $rc.EnforcementMode @($rc).Count }
         } catch { Write-Warn "Kunne ikke lese AppLocker: {0}" $($_.Exception.Message) }
         $svc = Get-Service AppIDSvc -ErrorAction SilentlyContinue
         if ($svc.Status -eq 'Running') { Write-Ok 'Tjenesten Application Identity kjører' } else { Write-Err "Tjenesten Application Identity: {0}" $($svc.Status) }
@@ -1893,7 +1904,7 @@ function Invoke-RemoveAll([hashtable]$Cfg) {
         }
     }
     Save-Config $Cfg
-    foreach ($f in @('PcWts2.dll', 'dns-reparert.json', 'applocker.xml', 'usage.json', 'wifi-sperret.json')) {
+    foreach ($f in @('PcWts3.dll', 'dns-reparert.json', 'applocker.xml', 'usage.json', 'wifi-sperret.json')) {
         Remove-Item -LiteralPath (Join-Path $InstallDir $f) -Force -ErrorAction SilentlyContinue
     }
     Write-Ok 'Foreldrekontrollen er fjernet. Start PC-en på nytt for at alt skal gjelde fullt ut.'

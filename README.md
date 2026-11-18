@@ -48,19 +48,22 @@ Gode vaner:
 
 1. Installer nye spill fra **din** konto, og start hvert spill én gang der. Da blir antijuks, DirectX og andre tillegg installert med administratorrettigheter, som barnet ikke har.
 2. Etter at du har installert et nytt spill: kjør meny 3 og velg **G** igjen, så blir det nye spillet tillatt.
-3. Vil et spill ikke starte for barnet, se i **Hendelsesliste > Program- og tjenestelogger > Microsoft > Windows > AppLocker** hva som ble stoppet, og tillat mappen med **M** i meny 3. Hjelper ikke det, prøv å slå av "Sperre kommandolinje" i meny 3.
+3. Vil et spill ikke starte for barnet, se i **Hendelsesliste** (eventvwr.msc) **> Logger for programmer og tjenester > Microsoft > Windows > AppLocker** hva som ble stoppet, og tillat mappen med **M** i meny 3. Hjelper ikke det, prøv å slå av "Sperre kommandolinje" i meny 3.
 4. Discord og andre programmer som installeres i brukerens egen mappe blir sperret. Bruk nettleserversjonen, eller installer en versjon for alle brukere fra din konto.
 
 ## Kjente begrensninger
 
 - **Gjelder hele PC-en:** DNS-filteret, Wi-Fi-filteret og VPN-sperren gjelder også voksne. Trenger du selv VPN, slår du det av i meny 6.
-- **Windows Home** har ikke AppLocker. Skriptet bruker da Software Restriction Policies, som Microsoft ikke lenger utvikler videre. Test at sperren virker (se under). Store-appen fjernes for barnet i stedet for å sperres; for å få den tilbake etter "Fjern", logg inn som barnet og kjør `wsreset -i`.
-- **Steam, Epic og lignende:** Er klienten tillatt for barnet, kan barnet hente gratisspill inne i den. Bruk Steam Family View / Epic sin foreldrekontroll i tillegg. Steam sin mappe er skrivbar for alle brukere, så skriptet sperrer den som standard.
+- **Windows Home** har ikke AppLocker. Skriptet bruker da Software Restriction Policies, som Microsoft ikke lenger utvikler videre, og som ifølge noen rapporter ikke alltid håndheves på nyere Windows 11. Test derfor alltid at sperren virker (test 1 under) før du stoler på den. Store-appen fjernes for barnet i stedet for å sperres; for å få den tilbake etter "Fjern", logg inn som barnet og kjør `wsreset -i`.
+- **Steam, Epic og lignende:** Er klienten tillatt for barnet, kan barnet hente gratisspill inne i den. Bruk Steam Family View / Epic sin foreldrekontroll i tillegg. Alle brukere kan skrive i Steam-mappen. Den er sperret til du tillater den (G i meny 3 tillater den), og da kan barnet i teorien legge egne programmer der og kjøre dem. Vil du stenge det hullet, sperr Steam igjen i meny 3 og bruk bare spill som ikke trenger Steam.
 - **OneDrive** ligger i brukerens egen mappe og blir derfor sperret for barnet.
 - **Sikkermodus og oppstart fra USB** kan bare stoppes helt med BIOS/UEFI-passord, slått av USB-oppstart og BitLocker.
 - **Nye kontoer:** Legger du til en ny voksenkonto etter oppsettet, kjør meny 10 (Bruk alle innstillinger på nytt), ellers behandles den som et barn av app-sperren.
 - **Kjør som administrator** avvises automatisk for alle standardbrukere (ikke bare barnet) når det valget er på. Bruk administratorkontoen til endringer.
 - **Nettlesere uten regelstøtte** (for eksempel Opera) som en voksen har installert, bør sperres i meny 3.
+- **Wi-Fi-navn med høyere tall** enn Anlegg50 sperres bare automatisk når Windows kan vise nettverkene rundt PC-en. Fra Windows 11 24H2 krever det at posisjonstjenester er på. Anlegg1 til Anlegg50 er alltid sperret. Wi-Fi-navn skiller mellom store og små bokstaver.
+- **Innebygde Windows-verktøy:** Noen innebygde verktøy (for eksempel rundll32) kan i teorien brukes til å kjøre egen kode. De kan ikke sperres uten at Windows slutter å virke som det skal.
+- **Fjern** setter ikke tilbake alt: en barnekonto som var administrator, forblir standardbruker; gjestekontoen forblir av; slettede Wi-Fi-profiler må legges inn på nytt; og barnets policy-nøkler beholder skrivebeskyttelsen (den er ufarlig).
 - **Nye nettverkskort sperret** (meny 4) kan også stoppe driveroppdateringer for nettverkskort. Slå det av midlertidig når du skal oppdatere drivere.
 
 ## Slik tester du at det virker

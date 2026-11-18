@@ -38,9 +38,9 @@ function ConvertTo-PcSpan([string]$Text) {
 # Lav prioritet, så spill og andre programmer aldri merker håndheveren.
 try { [Diagnostics.Process]::GetCurrentProcess().PriorityClass = [Diagnostics.ProcessPriorityClass]::BelowNormal } catch { }
 
-# Bare én kjøring om gangen (minutt-trigger og påloggings-trigger kan treffe samtidig).
-$mutex = New-Object System.Threading.Mutex($false, 'Global\ForeldrekontrollHaandhever')
-try { if (-not $mutex.WaitOne(30000)) { exit 0 } } catch [System.Threading.AbandonedMutexException] { }
+# Bare én kjøring om gangen: alle utløserne tilhører samme oppgave, og oppgaven har
+# MultipleInstancesPolicy IgnoreNew. (Ingen navngitt mutex: en vanlig bruker kunne lage og
+# holde den og dermed stoppe håndheveren.)
 
 try {
     if (-not (Test-Path -LiteralPath $ConfigPath)) { exit 0 }
@@ -50,7 +50,8 @@ try {
     # Sammenligner per adressefamilie med normaliserte adresser, og endrer bare når noe faktisk
     # er annerledes. Å sette DNS tømmer DNS-hurtigbufferen og skal ikke skje hvert minutt.
     function ConvertTo-PcIp([string]$a) { try { return ([System.Net.IPAddress]::Parse($a)).ToString() } catch { return $a } }
-    if ($cfg.Web -and $cfg.Web.Enabled -and $cfg.Web.Servers) {
+    # Hvert femte minutt holder, så håndheveren bruker minst mulig maskinkraft.
+    if ($cfg.Web -and $cfg.Web.Enabled -and $cfg.Web.Servers -and ((Get-Date).Minute % 5 -eq 0)) {
         $wantAll = @($cfg.Web.Servers | ForEach-Object { ConvertTo-PcIp $_ })
         $dnsState = @{}
         if (Test-Path -LiteralPath $DnsStatePath) {
@@ -121,9 +122,9 @@ try {
     $children = @($cfg.Children)
     if ($children.Count -eq 0) { exit 0 }
 
-    # C#-koden kompileres bare én gang til PcWts2.dll; senere kjøringer laster bare filen
+    # C#-koden kompileres bare én gang til PcWts3.dll; senere kjøringer laster bare filen
     # (å kompilere hvert minutt ville gitt et lite CPU-hopp hvert minutt).
-    $dll = Join-Path $Base 'PcWts2.dll'
+    $dll = Join-Path $Base 'PcWts3.dll'
     if (-not ('PcWts' -as [type]) -and (Test-Path -LiteralPath $dll)) {
         try { Add-Type -LiteralPath $dll } catch { Remove-Item -LiteralPath $dll -Force -ErrorAction SilentlyContinue }
     }
@@ -163,13 +164,14 @@ public static class PcWts {
         }
         WTSFreeMemory(p); return res.ToArray();
     }
-    // 1 = låst, 0 = ulåst, -1 = ukjent (WTSSessionInfoEx, SessionFlags ligger på byte 12).
+    // 1 = låst, 0 = ulåst, -1 = ukjent. WTSINFOEXW: Level (byte 0), så unionen på byte 8 (den
+    // inneholder LARGE_INTEGER og er derfor 8-justert): SessionId 8, SessionState 12, SessionFlags 16.
     public static int Locked(int id) {
         IntPtr b; int n;
         if (!WTSQuerySessionInformationW(IntPtr.Zero, id, 25, out b, out n)) return -1;
         try {
-            if (n < 16 || Marshal.ReadInt32(b, 0) != 1) return -1;
-            int flags = Marshal.ReadInt32(b, 12);
+            if (n < 20 || Marshal.ReadInt32(b, 0) != 1) return -1;
+            int flags = Marshal.ReadInt32(b, 16);
             if (flags == 0) return 1;
             if (flags == 1) return 0;
             return -1;
@@ -206,7 +208,7 @@ public static class PcWts {
             Window  = 'Екранний час дозволено лише з {0} до {1}.'
             WinEnd  = 'Дозволений проміжок часу на сьогодні закінчився.'
             Used    = 'Екранний час на сьогодні вичерпано.'
-            Logoff1 = 'Через 1 хвилину буде виконано вихід із системи. Збережи те, над чим працюєш.'
+            Logoff1 = 'Через 1 хвилину тебе буде виведено із системи. Збережи все, над чим працюєш.'
             Left    = 'Залишилося {0} хв екранного часу.'
         }
     }
@@ -332,6 +334,4 @@ public static class PcWts {
     $out | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $UsagePath -Encoding UTF8
 } catch {
     Write-PcLog "Feil: $($_.Exception.Message)"
-} finally {
-    try { $mutex.ReleaseMutex() } catch { }
 }
