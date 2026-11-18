@@ -15,6 +15,37 @@ Skriptet kan brukes på **norsk** eller **ukrainsk**. Språket velges første ga
 
 Skriptet kopierer seg selv til `C:\Program Files\Foreldrekontroll\`. Senere endringer gjør du ved å kjøre `Start-Foreldrekontroll.cmd` derfra.
 
+## Spørsmål og svar
+
+**Må barnets brukerkonto lages før jeg kjører skriptet?**
+Nei. Skriptet lager kontoen selv: i hurtigoppsettet (H) eller i meny 1 velger du «Lag ny barnekonto», skriver brukernavn, fullt navn og eventuelt et passord, og skriptet lager en lokal standardkonto (ikke administrator). Barnet trenger ikke logge på først; skriptet lager brukerprofilen selv, så alle sperrene kan settes med en gang.
+
+Har barnet allerede en konto på PC-en, velger du den i stedet («Velg en konto som finnes»). Er den kontoen administrator, gjør skriptet den om til standardbruker (bare hvis det finnes en annen administrator). Vil du at barnet skal bruke en Microsoft-konto, legger du den først til i Windows-innstillingene, og velger den deretter i meny 1.
+
+Du må selv ha en **administratorkonto** med et passord barnet ikke kjenner. Det er den du kjører skriptet fra.
+
+**Hvis du vil lage kontoen selv (ikke nødvendig)**
+
+Det trengs bare hvis barnet skal ha en Microsoft-konto, eller hvis du heller vil gjøre det i Windows. Navnene på knappene kan variere litt mellom Windows-versjoner; de engelske navnene står i parentes.
+
+*Microsoft-konto for barnet:*
+
+1. Logg på med administratorkontoen din.
+2. Åpne **Innstillinger > Kontoer > Familie** (Settings > Accounts > Family).
+3. Velg **Legg til noen** (Add someone), og følg veiviseren for å lage en ny Microsoft-konto for barnet (eller skriv inn e-postadressen til en konto barnet allerede har).
+4. Logg på med barnets konto én gang, og logg ut igjen.
+5. Kjør skriptet, og velg barnets konto i meny 1 («Velg en konto som finnes»).
+
+*Lokal konto (uten Microsoft-konto):*
+
+1. Åpne **Innstillinger > Kontoer > Andre brukere** (Settings > Accounts > Other users).
+2. Velg **Legg til konto** (Add account).
+3. Velg **Jeg har ikke påloggingsinformasjonen for denne personen** (I don't have this person's sign-in information), og deretter **Legg til en bruker uten Microsoft-konto** (Add a user without a Microsoft account).
+4. Skriv brukernavn og passord, og fullfør.
+5. Kjør skriptet, og velg kontoen i meny 1 («Velg en konto som finnes»).
+
+Windows lager slike kontoer som standardbrukere. Skriptet sjekker det uansett, og gjør om kontoen hvis den er administrator.
+
 ## Hva den gjør
 
 | Meny | Hva | Hvordan |
@@ -25,7 +56,7 @@ Skriptet kopierer seg selv til `C:\Program Files\Foreldrekontroll\`. Senere endr
 | 4 Trådløse nettverk | Bare tillatte nettverk, eller sperrede nettverk | `netsh wlan add filter`; kan også hindre nye nettverkskort (USB-deling fra mobil) og slå av Bluetooth-nettverk. Nettverk som heter **Anlegg** pluss et tall (Anlegg1, Anlegg2 og så videre) er alltid sperret som standard: 1 til 50 sperres med en gang, og håndheveren sperrer høyere tall når de dukker opp. Navnene kan endres i menyen |
 | 5 Nettfilter | Voksensider sperres, SafeSearch og YouTube begrenset modus | Familie-DNS (CleanBrowsing Family som standard, eller Cloudflare for Families) på alle nettverkskort; andre DNS-tjenere sperres i brannmuren; nettleserregler for Edge, Chrome, Brave og Firefox (ingen privat modus, ingen utvidelser, ingen egen DNS) |
 | 6 VPN og proxy | VPN kan ikke brukes | Windows sin innebygde VPN slås av, VPN-porter sperres i brannmuren, proxy kan bare endres av administrator, VPN-sidene i Innstillinger skjules for barnet |
-| 7 Ekstra sikring | Hindrer vanlige triks | Barnet kan ikke bytte tidssone; regedit sperres; valgfritt å slå av gjenopprettingsmiljøet (sikkermodus) |
+| 7 Ekstra sikring | Hindrer vanlige triks, og holder alt på plass etter Windows-oppdateringer | Barnet kan ikke bytte tidssone; regedit sperres; valgfritt å slå av gjenopprettingsmiljøet (sikkermodus); alt brukes automatisk på nytt etter Windows-oppdateringer (se under) |
 | 8 Ekstra tid | Gi barnet flere minutter i dag | Gjelder bare i dag, og forlenger også siste klokkeslett |
 | 9 Status | Viser hva som faktisk er satt | |
 | 10 Bruk på nytt | Setter alt på nytt fra lagrede innstillinger | Nyttig etter store Windows-oppdateringer, eller etter at en ny voksenkonto er lagt til |
@@ -34,6 +65,19 @@ Skriptet kopierer seg selv til `C:\Program Files\Foreldrekontroll\`. Senere endr
 Innstillingene lagres i `C:\Program Files\Foreldrekontroll\config.json`. Barnet kan lese, men ikke endre filene der.
 
 Meldingene barnet ser (varsler om skjermtid), vises på språket de voksne har valgt.
+
+## Etter Windows-oppdateringer
+
+Store Windows-oppdateringer kan tilbakestille noen innstillinger. Derfor finnes en egen planlagt oppgave, **Foreldrekontroll etter oppdatering**, som kjører som SYSTEM ved hver oppstart (etter 3 minutter) og én gang om dagen:
+
+- Den sammenligner Windows-versjonen (byggnummer og oppdateringsnummer) med forrige gang. Har Windows blitt oppdatert, brukes alle innstillinger på nytt, akkurat som meny 10.
+- Den sjekker også at de viktigste sperrene fortsatt er på plass (håndhever-oppgaven, AppLocker-reglene og -tjenesten, brannmurreglene og VPN-tjenestene). Mangler noe, brukes alt på nytt.
+- Ellers gjør den ingenting, så den koster nesten ingenting de fleste dager.
+- Den endrer bare det som faktisk mangler eller er annerledes, så Wi-Fi-tilkoblingen og nettspill ikke blir avbrutt. Lykkes ikke alt, prøver den igjen dagen etter (ikke hver gang).
+- Innstillingene lagres trygt: forrige versjon ligger som `config.json.bak`, og er filen skadet (for eksempel etter strømbrudd), brukes sikkerhetskopien. Kan ingen av dem leses, endres ingenting.
+- Hva den har gjort, står i `C:\Program Files\Foreldrekontroll\etter-oppdatering.log`, og i status (meny 9).
+
+Dette er på som standard og kan slås av i meny 7. Voksne som har kjørt skriptet, huskes, så kontoene deres aldri blir behandlet som barn når innstillingene brukes på nytt automatisk.
 
 ## Spill (Fortnite, Battlefield og andre)
 
@@ -86,6 +130,7 @@ Logg så inn som voksen, velg **11** og kontroller med **9** at alt er borte.
 - `Start-Foreldrekontroll.cmd`: starter oppsettet som administrator
 - `lang/uk.psd1`: ukrainske tekster (norsk tekst er nøkkelen)
 - `tests/Test-Oversettelser.ps1`: sjekker at alle tekster er oversatt og at plassholderne stemmer
+- `tests/Test-EtterOppdatering.ps1`: tester når innstillingene brukes på nytt etter oppdateringer, og at oppgave-XML-en er gyldig
 - `tests/Test-Kulturer.ps1`: kjører det ukrainske grensesnittet med norsk, engelsk og ukrainsk Windows-kultur (formatering, ja/nei-svar og menybokstaver fra ukrainsk tastatur)
 
 ## Lisens
