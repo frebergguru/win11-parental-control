@@ -2,16 +2,16 @@
 
 Et interaktivt skript som setter opp foreldrekontroll på en Windows 11-PC med Windows sine egne verktøy. Ingen ekstra programvare, ingen konto i skyen, og alt kan fjernes igjen fra menyen.
 
-> **English summary:** An interactive PowerShell script (menus in Norwegian) that sets up parental control on Windows 11 using only built-in Windows features: a standard child account, screen time with warnings and automatic logoff, an app allowlist that blocks installing new apps and games (AppLocker on Pro/Education/Enterprise, Software Restriction Policies on Home), Wi-Fi network filters, a family DNS filter with forced SafeSearch and browser policies, and VPN/proxy blocking. Everything can be undone from the menu. The menus are available in Norwegian and Ukrainian ([README.uk.md](README.uk.md)). Run `Start-Foreldrekontroll.cmd` as an administrator. Licensed under MIT.
+> **English summary:** An interactive PowerShell script (menus in Norwegian or Ukrainian) that sets up parental control on Windows 11 using only built-in Windows features: a standard child account, screen time with warnings and automatic logoff, an app allowlist that blocks installing new apps and games (AppLocker on Pro/Education/Enterprise, Software Restriction Policies on Home), Wi-Fi network filters, a family DNS filter with forced SafeSearch and browser policies, and VPN/proxy blocking. Everything can be undone from the menu. The menus are available in Norwegian and Ukrainian ([README.uk.md](README.uk.md)). Run `Start-Foreldrekontroll.cmd` as an administrator. Licensed under MIT.
 
 Skriptet kan brukes på **norsk** eller **ukrainsk**. Språket velges første gang, og kan byttes med **L** i hovedmenyen. Українська версія цього посібника: [README.uk.md](README.uk.md).
 
 ## Kom i gang
 
-1. Kopier hele mappen til PC-en (alle filene må ligge sammen).
+1. Kopier hele mappen til PC-en (alle filene, også mappen `lang`, må ligge sammen).
 2. Logg inn med en **administratorkonto** (din, ikke barnets).
 3. Dobbeltklikk `Start-Foreldrekontroll.cmd` og godta spørsmålet om administratorrettigheter.
-4. Velg **H** (hurtigoppsett) første gang.
+4. Velg språk, og deretter **H** (hurtigoppsett) første gang.
 
 Skriptet kopierer seg selv til `C:\Program Files\Foreldrekontroll\`. Senere endringer gjør du ved å kjøre `Start-Foreldrekontroll.cmd` derfra.
 
@@ -19,8 +19,8 @@ Skriptet kopierer seg selv til `C:\Program Files\Foreldrekontroll\`. Senere endr
 
 | Meny | Hva | Hvordan |
 |---|---|---|
-| 1 Barnekontoer | Egen standardkonto for barnet (aldri administrator) | `New-LocalUser`, grupper slås opp med SID, så det virker på norsk Windows |
-| 2 Skjermtid | Tidsrom per dag og maks minutter per dag, varsel 10, 5 og 1 minutt før, utlogging | Planlagt oppgave som kjører `Haandhever.ps1` som SYSTEM hvert minutt, pluss påloggingstider på kontoen |
+| 1 Barnekontoer | Egen standardkonto for barnet (aldri administrator) | `New-LocalUser`, grupper slås opp med SID, så det virker på alle språkversjoner av Windows |
+| 2 Skjermtid | Tidsrom per dag og maks minutter per dag, varsel 10 og 3 minutter før, utlogging | Planlagt oppgave som kjører `Haandhever.ps1` som SYSTEM hvert minutt, pluss påloggingstider på kontoen |
 | 3 Apper og spill | Barnet kan ikke installere eller kjøre nye programmer; du velger hvilke installerte apper og spill som er tillatt | AppLocker (Pro, Education, Enterprise) eller Software Restriction Policies (Home); Microsoft Store, winget og Xbox-appen sperres; kommandolinje og PowerShell sperres for barnet; "Kjør som administrator" avvises automatisk |
 | 4 Trådløse nettverk | Bare tillatte nettverk, eller sperrede nettverk | `netsh wlan add filter`; kan også hindre nye nettverkskort (USB-deling fra mobil) og slå av Bluetooth-nettverk. Nettverk som heter **Anlegg** pluss et tall (Anlegg1, Anlegg2 og så videre) er alltid sperret som standard: 1 til 50 sperres med en gang, og håndheveren sperrer høyere tall når de dukker opp. Navnene kan endres i menyen |
 | 5 Nettfilter | Voksensider sperres, SafeSearch og YouTube begrenset modus | Familie-DNS (CleanBrowsing Family som standard, eller Cloudflare for Families) på alle nettverkskort; andre DNS-tjenere sperres i brannmuren; nettleserregler for Edge, Chrome, Brave og Firefox (ingen privat modus, ingen utvidelser, ingen egen DNS) |
@@ -28,10 +28,12 @@ Skriptet kopierer seg selv til `C:\Program Files\Foreldrekontroll\`. Senere endr
 | 7 Ekstra sikring | Hindrer vanlige triks | Barnet kan ikke bytte tidssone; regedit sperres; valgfritt å slå av gjenopprettingsmiljøet (sikkermodus) |
 | 8 Ekstra tid | Gi barnet flere minutter i dag | Gjelder bare i dag, og forlenger også siste klokkeslett |
 | 9 Status | Viser hva som faktisk er satt | |
-| 10 Bruk på nytt | Setter alt på nytt fra lagrede innstillinger | Nyttig etter store Windows-oppdateringer |
+| 10 Bruk på nytt | Setter alt på nytt fra lagrede innstillinger | Nyttig etter store Windows-oppdateringer, eller etter at en ny voksenkonto er lagt til |
 | 11 Fjern | Fjerner alt og setter tilbake det som var | Spør før barnekontoen eventuelt slettes |
 
 Innstillingene lagres i `C:\Program Files\Foreldrekontroll\config.json`. Barnet kan lese, men ikke endre filene der.
+
+Meldingene barnet ser (varsler om skjermtid), vises på språket de voksne har valgt.
 
 ## Spill (Fortnite, Battlefield og andre)
 
