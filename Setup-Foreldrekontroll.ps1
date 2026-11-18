@@ -114,34 +114,85 @@ $GameServiceDirs = @(
 $StorePackages = @('Microsoft.WindowsStore', 'Microsoft.DesktopAppInstaller', 'Microsoft.StorePurchaseApp')
 $XboxPackages  = @('Microsoft.GamingApp', 'Microsoft.XboxApp')
 
+# ============================================================== Språk
+
+# Norsk tekst er nøkkelen; oversettelser ligger i lang\<kode>.psd1 (for eksempel lang\uk.psd1).
+$script:Lang = 'nb'
+$script:Tr = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+$Languages = [ordered]@{ nb = 'Norsk (bokmål)'; uk = 'Українська' }
+
+function Import-Language([string]$Code) {
+    $script:Lang = 'nb'
+    $script:Tr.Clear()
+    if ($Code -eq 'nb' -or -not $Code) { return }
+    foreach ($dir in @("$(Split-Path -Parent $PSCommandPath)\lang", "$InstallDir\lang")) {
+        $f = "$dir\$Code.psd1"
+        if (-not (Test-Path -LiteralPath $f)) { $f = [IO.Path]::Combine((Split-Path -Parent $PSCommandPath), 'lang', "$Code.psd1") }
+        if (Test-Path -LiteralPath $f) {
+            $data = Import-PowerShellDataFile -LiteralPath $f
+            foreach ($k in $data.Keys) { $script:Tr[[string]$k] = [string]$data[$k] }
+            $script:Lang = $Code
+            return
+        }
+    }
+    Write-Host "Language file lang\$Code.psd1 not found, using Norwegian." -ForegroundColor Yellow
+}
+
+function T([string]$Text) {
+    # Oversetter en tekst. Mellomrom foran beholdes. Ekstra argumenter settes inn i {0}, {1} ...
+    $lead = $Text.Length - $Text.TrimStart().Length
+    $core = $Text.Trim()
+    $val = $null
+    if ($script:Lang -ne 'nb' -and $core -and $script:Tr.TryGetValue($core, [ref]$val)) { $core = $val }
+    $out = (' ' * $lead) + $core
+    if ($args.Count -gt 0) { $out = $out -f $args }
+    return $out
+}
+
+function Select-Language([hashtable]$Cfg) {
+    Write-Host ''
+    Write-Host '  Velg språk / Оберіть мову:' -ForegroundColor Cyan
+    $codes = @($Languages.Keys)
+    for ($i = 0; $i -lt $codes.Count; $i++) { Write-Host ("   {0}. {1}" -f ($i + 1), $Languages[$codes[$i]]) }
+    while ($true) {
+        $a = (Read-Host '  1/2').Trim()
+        $n = 0
+        if ([int]::TryParse($a, [ref]$n) -and $n -ge 1 -and $n -le $codes.Count) { break }
+    }
+    $Cfg.Language = $codes[$n - 1]
+    Import-Language $Cfg.Language
+}
+
 # ============================================================== Hjelpere for inndata
 
 function Write-Title([string]$Text) {
     Write-Host ''
     Write-Host ('=' * 70) -ForegroundColor DarkCyan
-    Write-Host " $Text" -ForegroundColor Cyan
+    Write-Host (' ' + (T $Text @args)) -ForegroundColor Cyan
     Write-Host ('=' * 70) -ForegroundColor DarkCyan
 }
-function Write-Ok([string]$Text)   { Write-Host "  [OK] $Text" -ForegroundColor Green }
-function Write-Warn([string]$Text) { Write-Host "  [!]  $Text" -ForegroundColor Yellow }
-function Write-Err([string]$Text)  { Write-Host "  [X]  $Text" -ForegroundColor Red }
-function Write-Info([string]$Text) { Write-Host "       $Text" -ForegroundColor Gray }
+function Write-Ok([string]$Text)   { Write-Host ('  [OK] ' + (T $Text @args)) -ForegroundColor Green }
+function Write-Warn([string]$Text) { Write-Host ('  [!]  ' + (T $Text @args)) -ForegroundColor Yellow }
+function Write-Err([string]$Text)  { Write-Host ('  [X]  ' + (T $Text @args)) -ForegroundColor Red }
+function Write-Info([string]$Text) { Write-Host ('       ' + (T $Text @args)) -ForegroundColor Gray }
 
-function Wait-Key { [void](Read-Host "`nTrykk Enter for å fortsette") }
+function Wait-Key { [void](Read-Host ("`n" + (T 'Trykk Enter for å fortsette'))) }
 
 function Read-YesNo([string]$Prompt, [bool]$Default = $true) {
-    $hint = if ($Default) { '[J/n]' } else { '[j/N]' }
+    $y = T 'j'; $n = T 'n'
+    $hint = if ($Default) { '[{0}/{1}]' -f $y.ToUpper(), $n } else { '[{0}/{1}]' -f $y, $n.ToUpper() }
     while ($true) {
-        $a = (Read-Host "$Prompt $hint").Trim().ToLower()
+        $a = (Read-Host ((T $Prompt) + ' ' + $hint)).Trim().ToLower()
         if ($a -eq '') { return $Default }
-        if ($a -in @('j', 'ja', 'y', 'yes')) { return $true }
-        if ($a -in @('n', 'nei', 'no')) { return $false }
+        if ($a -in @('j', 'ja', 'y', 'yes', 'т', 'так')) { return $true }
+        if ($a -in @('n', 'nei', 'no', 'н', 'ні')) { return $false }
         Write-Warn 'Svar j eller n.'
     }
 }
 
 function Read-Text([string]$Prompt, [string]$Default = '') {
-    $p = if ($Default) { "$Prompt [$Default]" } else { $Prompt }
+    $p = T $Prompt
+    if ($Default) { $p = "$p [$Default]" }
     $a = (Read-Host $p).Trim()
     if ($a -eq '') { return $Default }
     return $a
@@ -159,20 +210,24 @@ function Read-Time([string]$Prompt, [string]$Default) {
     }
 }
 
+function Test-NoLimitWord([string]$Text) {
+    return ($Text -in @('ingen', '-', '-1', 'без', 'немає', (T 'ingen')))
+}
+
 function Read-Limit([string]$Prompt, $Default) {
-    $d = if ($Default -lt 0) { 'ingen' } else { [string]$Default }
+    $d = if ($Default -lt 0) { T 'ingen' } else { [string]$Default }
     while ($true) {
-        $a = Read-Text "$Prompt (minutter, 0 = ingen tilgang, 'ingen' = ingen grense)" $d
-        if ($a -in @('ingen', '-', '-1')) { return -1 }
+        $a = Read-Text ((T $Prompt) + ' ' + (T "(minutter, 0 = ingen tilgang, '{0}' = ingen grense)" (T 'ingen'))) $d
+        if (Test-NoLimitWord $a) { return -1 }
         $n = 0
         if ([int]::TryParse($a, [ref]$n) -and $n -ge 0 -and $n -le 1440) { return $n }
-        Write-Warn 'Skriv et tall mellom 0 og 1440, eller ingen.'
+        Write-Warn "Skriv et tall mellom 0 og 1440, eller '{0}'." (T 'ingen')
     }
 }
 
 function Read-Numbers([string]$Prompt, [int]$Max) {
     # "1,3,5-7" til en liste med tall.
-    $a = Read-Host $Prompt
+    $a = Read-Host (T $Prompt)
     $res = @()
     foreach ($part in ($a -split '[,; ]+' | Where-Object { $_ })) {
         if ($part -match '^(\d+)-(\d+)$') { $res += [int]$Matches[1]..[int]$Matches[2] }
@@ -221,6 +276,7 @@ function Get-DefaultConfig {
     foreach ($d in $Weekend)  { $days[$d] = @{ Start = '08:00'; End = '21:00'; Limit = 180 } }
     return @{
         Version    = 1
+        Language   = ''
         Children   = @()
         ScreenTime = @{ Enabled = $false; Days = $days; Warn = @(10, 3) }
         Bonus      = @{ Date = ''; Minutes = 0 }
@@ -250,7 +306,7 @@ function Get-Config {
             $loaded = ConvertTo-PcHashtable (Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json)
             $cfg = Merge-PcDefaults $cfg $loaded
         } catch {
-            Write-Warn "Kunne ikke lese $ConfigPath ($($_.Exception.Message)). Starter med standardverdier."
+            Write-Warn "Kunne ikke lese {0} ({1}). Starter med standardverdier." $ConfigPath $($_.Exception.Message)
         }
     }
     return $cfg
@@ -392,9 +448,9 @@ function Get-ChildProfilePath([hashtable]$Child) {
     Initialize-ProfileApi
     $sb = New-Object Text.StringBuilder 260
     $hr = [PcProfile]::CreateProfile($Child.Sid, $Child.Name, $sb, 260)
-    if ($hr -ne 0 -and $hr -ne -2147024713) { throw "Kunne ikke lage brukerprofil for $($Child.Name) (HRESULT 0x{0:X8})." -f $hr }
+    if ($hr -ne 0 -and $hr -ne -2147024713) { throw (T "Kunne ikke lage brukerprofil for {0} (HRESULT 0x{1:X8})." $($Child.Name) $hr) }
     $p = Get-PcReg $key 'ProfileImagePath'
-    if (-not $p) { throw "Fant ikke brukerprofilen til $($Child.Name)." }
+    if (-not $p) { throw (T "Fant ikke brukerprofilen til {0}." $($Child.Name)) }
     return [Environment]::ExpandEnvironmentVariables($p)
 }
 
@@ -404,7 +460,7 @@ function Invoke-WithChildHive([hashtable]$Child, [scriptblock]$Script) {
     $hive  = Join-Path (Get-ChildProfilePath $Child) 'NTUSER.DAT'
     $mount = 'FK_' + ($Child.Sid -replace '[^0-9]', '')
     $r = Invoke-Native "$env:windir\System32\reg.exe" "load `"HKU\$mount`" `"$hive`""
-    if ($r.ExitCode -ne 0) { throw "Kunne ikke åpne registeret til $($Child.Name): $($r.Output.Trim())" }
+    if ($r.ExitCode -ne 0) { throw (T "Kunne ikke åpne registeret til {0}: {1}" $($Child.Name) $($r.Output.Trim())) }
     try {
         & $Script "Registry::HKEY_USERS\$mount"
     } finally {
@@ -413,7 +469,7 @@ function Invoke-WithChildHive([hashtable]$Child, [scriptblock]$Script) {
         if ($u.ExitCode -ne 0) {
             Start-Sleep -Seconds 2; [GC]::Collect()
             $u = Invoke-Native "$env:windir\System32\reg.exe" "unload `"HKU\$mount`""
-            if ($u.ExitCode -ne 0) { Write-Warn "Registeret til $($Child.Name) kunne ikke lukkes. Start PC-en på nytt før barnet logger på." }
+            if ($u.ExitCode -ne 0) { Write-Warn "Registeret til {0} kunne ikke lukkes. Start PC-en på nytt før barnet logger på." $($Child.Name) }
         }
     }
 }
@@ -554,9 +610,9 @@ function Show-Children([hashtable]$Cfg) {
     $admins = Get-GroupMemberSids $SidAdmins
     foreach ($c in $Cfg.Children) {
         $u = Get-LocalUser -SID $c.Sid -ErrorAction SilentlyContinue
-        if (-not $u) { Write-Err "$($c.Name): kontoen finnes ikke lenger"; continue }
-        if ($admins -contains $c.Sid) { Write-Err "$($u.Name): er ADMINISTRATOR (må være standardbruker)" }
-        else { Write-Ok "$($u.Name): standardbruker" }
+        if (-not $u) { Write-Err "{0}: kontoen finnes ikke lenger" $($c.Name); continue }
+        if ($admins -contains $c.Sid) { Write-Err "{0}: er ADMINISTRATOR (må være standardbruker)" $($u.Name) }
+        else { Write-Ok "{0}: standardbruker" $($u.Name) }
     }
 }
 
@@ -565,7 +621,7 @@ function Test-ParentSafety {
     $admins = Get-GroupMemberSids $SidAdmins
     foreach ($u in (Get-LocalAccounts | Where-Object { $_.Enabled -and $admins -contains $_.SID.Value })) {
         if (-not $u.PasswordRequired -or -not $u.PasswordLastSet) {
-            Write-Warn "Administratorkontoen '$($u.Name)' ser ut til å mangle passord. Gi den et passord barnet ikke kjenner."
+            Write-Warn "Administratorkontoen '{0}' ser ut til å mangle passord. Gi den et passord barnet ikke kjenner." $($u.Name)
         }
     }
     $guest = Get-LocalUser | Where-Object { $_.SID.Value -match '-501$' }
@@ -578,12 +634,12 @@ function Test-ParentSafety {
 function New-ChildAccount([hashtable]$Cfg) {
     $name = Read-Text 'Brukernavn for barnet (for eksempel emma)'
     if (-not $name -or $name -notmatch '^[^\\/\[\]:;|=,+*?<>"@]{1,20}$') { Write-Err 'Ugyldig brukernavn.'; return }
-    if (Get-LocalUser -Name $name -ErrorAction SilentlyContinue) { Write-Err "Kontoen '$name' finnes allerede. Velg den i stedet."; return }
+    if (Get-LocalUser -Name $name -ErrorAction SilentlyContinue) { Write-Err "Kontoen '{0}' finnes allerede. Velg den i stedet." $name; return }
     $full = Read-Text 'Fullt navn (vises på påloggingsskjermen)' $name
-    $pw1 = Read-Host 'Passord for barnet (tomt = uten passord)' -AsSecureString
+    $pw1 = Read-Host (T 'Passord for barnet (tomt = uten passord)') -AsSecureString
     $params = @{ Name = $name; FullName = $full; Description = 'Barnekonto (foreldrekontroll)'; AccountNeverExpires = $true }
     if ($pw1.Length -gt 0) {
-        $pw2 = Read-Host 'Skriv passordet en gang til' -AsSecureString
+        $pw2 = Read-Host (T 'Skriv passordet en gang til') -AsSecureString
         if ((ConvertTo-PlainText $pw1) -cne (ConvertTo-PlainText $pw2)) { Write-Err 'Passordene er ikke like.'; return }
         $params.Password = $pw1
         $params.PasswordNeverExpires = $true
@@ -595,7 +651,7 @@ function New-ChildAccount([hashtable]$Cfg) {
     $child = @{ Name = $u.Name; Sid = $u.SID.Value }
     $Cfg.Children = @($Cfg.Children) + @($child)
     [void](Get-ChildProfilePath $child)
-    Write-Ok "Kontoen '$name' er laget som standardbruker."
+    Write-Ok "Kontoen '{0}' er laget som standardbruker." $name
 }
 
 function Select-ExistingChild([hashtable]$Cfg) {
@@ -606,8 +662,8 @@ function Select-ExistingChild([hashtable]$Cfg) {
     if ($cands.Count -eq 0) { Write-Info 'Ingen andre kontoer å velge.'; return }
     for ($i = 0; $i -lt $cands.Count; $i++) {
         $u = $cands[$i]
-        $tag = if ($admins -contains $u.SID.Value) { 'administrator' } else { 'standardbruker' }
-        $src = if ($u.PrincipalSource -eq 'MicrosoftAccount') { ', Microsoft-konto' } else { '' }
+        $tag = if ($admins -contains $u.SID.Value) { T 'administrator' } else { T 'standardbruker' }
+        $src = if ($u.PrincipalSource -eq 'MicrosoftAccount') { ', ' + (T 'Microsoft-konto') } else { '' }
         Write-Host ("  {0,2}. {1} ({2}{3})" -f ($i + 1), $u.Name, $tag, $src)
     }
     $n = Read-Numbers 'Hvilken konto er barnets? (nummer)' $cands.Count
@@ -615,14 +671,14 @@ function Select-ExistingChild([hashtable]$Cfg) {
         $u = $cands[$idx - 1]
         if ($admins -contains $u.SID.Value) {
             $otherAdmins = @($admins | Where-Object { $_ -ne $u.SID.Value -and $_ -match '^S-1-5-21-' })
-            if ($otherAdmins.Count -eq 0) { Write-Err "'$($u.Name)' er eneste administrator og kan ikke gjøres om."; continue }
-            if (-not (Read-YesNo "'$($u.Name)' er administrator. Gjøre om til standardbruker?" $true)) { continue }
+            if ($otherAdmins.Count -eq 0) { Write-Err "'{0}' er eneste administrator og kan ikke gjøres om." $($u.Name); continue }
+            if (-not (Read-YesNo (T "'{0}' er administrator. Gjøre om til standardbruker?" $($u.Name)) $true)) { continue }
             Remove-LocalGroupMember -SID $SidAdmins -Member $u
             Add-LocalGroupMember -SID $SidUsers -Member $u -ErrorAction SilentlyContinue
-            Write-Ok "'$($u.Name)' er nå standardbruker. Endringen gjelder fra neste pålogging."
+            Write-Ok "'{0}' er nå standardbruker. Endringen gjelder fra neste pålogging." $($u.Name)
         }
         $Cfg.Children = @($Cfg.Children) + @(@{ Name = $u.Name; Sid = $u.SID.Value })
-        Write-Ok "'$($u.Name)' er lagt til som barnekonto."
+        Write-Ok "'{0}' er lagt til som barnekonto." $($u.Name)
     }
 }
 
@@ -631,18 +687,18 @@ function Menu-Children([hashtable]$Cfg) {
         Write-Title 'Barnekontoer'
         Show-Children $Cfg
         Write-Host ''
-        Write-Host '  1. Lag ny barnekonto'
-        Write-Host '  2. Velg en konto som finnes'
-        Write-Host '  3. Bytt passord for en barnekonto'
-        Write-Host '  4. Fjern en konto fra listen (kontoen slettes ikke)'
-        Write-Host '  0. Tilbake'
-        switch (Read-Host 'Valg') {
+        Write-Host (T '  1. Lag ny barnekonto')
+        Write-Host (T '  2. Velg en konto som finnes')
+        Write-Host (T '  3. Bytt passord for en barnekonto')
+        Write-Host (T '  4. Fjern en konto fra listen (kontoen slettes ikke)')
+        Write-Host (T '  0. Tilbake')
+        switch (Read-Host (T 'Valg')) {
             '1' { New-ChildAccount $Cfg; Save-Config $Cfg }
             '2' { Select-ExistingChild $Cfg; Save-Config $Cfg }
             '3' {
                 $c = Select-Child $Cfg
                 if ($c) {
-                    $pw = Read-Host "Nytt passord for $($c.Name)" -AsSecureString
+                    $pw = Read-Host (T "Nytt passord for {0}" $($c.Name)) -AsSecureString
                     Set-LocalUser -SID $c.Sid -Password $pw
                     Write-Ok 'Passordet er byttet.'
                 }
@@ -654,7 +710,7 @@ function Menu-Children([hashtable]$Cfg) {
                     Set-LogonHours @{ ScreenTime = @{ Enabled = $false } } $c
                     $Cfg.Children = @($Cfg.Children | Where-Object { $_.Sid -ne $c.Sid })
                     Save-Config $Cfg
-                    Write-Ok "$($c.Name) er fjernet fra listen. Bruk 'Bruk alle innstillinger på nytt' for å oppdatere app-reglene."
+                    Write-Ok "{0} er fjernet fra listen. Bruk 'Bruk alle innstillinger på nytt' for å oppdatere app-reglene." $($c.Name)
                 }
             }
             '0' { Test-ParentSafety; return }
@@ -675,25 +731,24 @@ function Select-Child([hashtable]$Cfg) {
 # ============================================================== 2. Skjermtid
 
 function Format-Limit($Limit) {
-    if ($Limit -lt 0) { return 'ingen grense' }
-    if ($Limit -eq 0) { return 'ingen tilgang' }
-    return ('{0}t {1:00}m' -f [math]::Floor($Limit / 60), ($Limit % 60))
+    if ($Limit -lt 0) { return (T 'ingen grense') }
+    if ($Limit -eq 0) { return (T 'ingen tilgang') }
+    return (T '{0} t {1:00} min' ([math]::Floor($Limit / 60)) ($Limit % 60))
 }
 
 function Show-Schedule([hashtable]$Cfg) {
-    $state = if ($Cfg.ScreenTime.Enabled) { 'PÅ' } else { 'AV' }
-    Write-Host "  Skjermtid er $state"
+    if ($Cfg.ScreenTime.Enabled) { Write-Host (T '  Skjermtid er PÅ') } else { Write-Host (T '  Skjermtid er AV') }
     Write-Host ''
-    Write-Host ('  {0,-9} {1,-6} {2,-6} {3}' -f 'Dag', 'Fra', 'Til', 'Maks per dag')
+    Write-Host ('  {0,-11} {1,-6} {2,-6} {3}' -f (T 'Dag'), (T 'Fra'), (T 'Til'), (T 'Maks per dag'))
     foreach ($d in $DayNames.Keys) {
         $r = $Cfg.ScreenTime.Days[$d]
-        Write-Host ('  {0,-9} {1,-6} {2,-6} {3}' -f $DayNames[$d], $r.Start, $r.End, (Format-Limit $r.Limit))
+        Write-Host ('  {0,-11} {1,-6} {2,-6} {3}' -f (T $DayNames[$d]), $r.Start, $r.End, (Format-Limit $r.Limit))
     }
 }
 
 function Edit-Days([hashtable]$Cfg, [string[]]$Days, [string]$Label) {
     $first = $Cfg.ScreenTime.Days[$Days[0]]
-    Write-Host "`n  $Label"
+    Write-Host ("`n  " + (T $Label))
     $start = Read-Time '  Tidligste klokkeslett' $first.Start
     while ($true) {
         $end = Read-Time '  Seneste klokkeslett' $first.End
@@ -715,7 +770,7 @@ function Menu-ScreenTime([hashtable]$Cfg, [switch]$Wizard) {
             Edit-Days $Cfg $Weekdays 'Hverdager (mandag til fredag)'
             Edit-Days $Cfg $Weekend 'Helg (lørdag og søndag)'
             if (Read-YesNo 'Vil du endre enkeltdager også?' $false) {
-                foreach ($d in $DayNames.Keys) { if (Read-YesNo "  Endre $($DayNames[$d])?" $false) { Edit-Days $Cfg @($d) $DayNames[$d] } }
+                foreach ($d in $DayNames.Keys) { if (Read-YesNo (T "  Endre {0}?" (T $DayNames[$d])) $false) { Edit-Days $Cfg @($d) $DayNames[$d] } }
             }
         }
         Save-Config $Cfg; Apply-ScreenTime $Cfg
@@ -725,19 +780,19 @@ function Menu-ScreenTime([hashtable]$Cfg, [switch]$Wizard) {
         Write-Title 'Skjermtid'
         Show-Schedule $Cfg
         Write-Host ''
-        Write-Host '  1. Slå skjermtid på/av'
-        Write-Host '  2. Sett hverdager (mandag til fredag)'
-        Write-Host '  3. Sett helg (lørdag og søndag)'
-        Write-Host '  4. Endre én dag'
-        Write-Host '  5. Vis brukt tid i dag'
-        Write-Host '  0. Tilbake (lagrer og tar i bruk)'
-        switch (Read-Host 'Valg') {
+        Write-Host (T '  1. Slå skjermtid på/av')
+        Write-Host (T '  2. Sett hverdager (mandag til fredag)')
+        Write-Host (T '  3. Sett helg (lørdag og søndag)')
+        Write-Host (T '  4. Endre én dag')
+        Write-Host (T '  5. Vis brukt tid i dag')
+        Write-Host (T '  0. Tilbake (lagrer og tar i bruk)')
+        switch (Read-Host (T 'Valg')) {
             '1' { $Cfg.ScreenTime.Enabled = -not $Cfg.ScreenTime.Enabled }
             '2' { Edit-Days $Cfg $Weekdays 'Hverdager' }
             '3' { Edit-Days $Cfg $Weekend 'Helg' }
             '4' {
                 $keys = @($DayNames.Keys)
-                for ($i = 0; $i -lt 7; $i++) { Write-Host ("  {0}. {1}" -f ($i + 1), $DayNames[$keys[$i]]) }
+                for ($i = 0; $i -lt 7; $i++) { Write-Host ("  {0}. {1}" -f ($i + 1), (T $DayNames[$keys[$i]])) }
                 $n = Read-Numbers 'Hvilken dag?' 7
                 if ($n.Count) { Edit-Days $Cfg @($keys[$n[0] - 1]) $DayNames[$keys[$n[0] - 1]] }
             }
@@ -753,7 +808,7 @@ function Show-UsageToday([hashtable]$Cfg) {
     foreach ($c in $Cfg.Children) {
         $m = 0
         if ($u -and $u.Date -eq (Get-Date).ToString('yyyy-MM-dd') -and $u.Users.($c.Sid)) { $m = [math]::Round([double]$u.Users.($c.Sid).Minutes) }
-        Write-Info "$($c.Name): $m minutter brukt i dag"
+        Write-Info "{0}: {1} minutter brukt i dag" $($c.Name) $m
     }
 }
 
@@ -789,7 +844,7 @@ function Set-LogonHours([hashtable]$Cfg, [hashtable]$Child) {
         $u.Put('LogonHours', [byte[]]$bytes)
         $u.SetInfo()
     } catch {
-        Write-Warn "Kunne ikke sette påloggingstider for $($Child.Name): $($_.Exception.Message)"
+        Write-Warn "Kunne ikke sette påloggingstider for {0}: {1}" $($Child.Name) $($_.Exception.Message)
     }
 }
 
@@ -800,6 +855,12 @@ function Install-Files {
         $src = Join-Path $here $f
         $dst = Join-Path $InstallDir $f
         if ((Test-Path -LiteralPath $src) -and ($src -ne $dst)) { Copy-Item -LiteralPath $src -Destination $dst -Force }
+    }
+    $langSrc = Join-Path $here 'lang'
+    $langDst = Join-Path $InstallDir 'lang'
+    if ((Test-Path -LiteralPath $langSrc) -and ($langSrc -ne $langDst)) {
+        New-Item -ItemType Directory -Path $langDst -Force | Out-Null
+        Copy-Item -Path (Join-Path $langSrc '*.psd1') -Destination $langDst -Force
     }
     # Håndheveren kompilerer PcWts.dll på nytt neste gang (i tilfelle koden er endret).
     Remove-Item -LiteralPath (Join-Path $InstallDir 'PcWts2.dll') -Force -ErrorAction SilentlyContinue
@@ -854,7 +915,7 @@ function Menu-Bonus([hashtable]$Cfg) {
     Write-Title 'Gi ekstra tid i dag'
     $today = (Get-Date).ToString('yyyy-MM-dd')
     $have = if ($Cfg.Bonus.Date -eq $today) { [int]$Cfg.Bonus.Minutes } else { 0 }
-    Write-Info "Ekstra tid gitt i dag: $have minutter. Ekstra tid gjelder også etter siste klokkeslett."
+    Write-Info "Ekstra tid gitt i dag: {0} minutter. Ekstra tid gjelder også etter siste klokkeslett." $have
     $n = 0
     $a = Read-Text 'Hvor mange minutter ekstra? (negativt tall trekker fra)' '30'
     if (-not [int]::TryParse($a, [ref]$n)) { Write-Err 'Ikke et tall.'; return }
@@ -862,7 +923,7 @@ function Menu-Bonus([hashtable]$Cfg) {
     Save-Config $Cfg
     # Påloggingstidene utvides også, så ekstra tid kan brukes etter en utlogging eller omstart.
     if ($Cfg.ScreenTime.Enabled) { foreach ($c in $Cfg.Children) { Set-LogonHours $Cfg $c } }
-    Write-Ok "Ekstra tid i dag er nå $($Cfg.Bonus.Minutes) minutter."
+    Write-Ok "Ekstra tid i dag er nå {0} minutter." $($Cfg.Bonus.Minutes)
 }
 
 # ============================================================== 3. Apper og spill
@@ -1030,21 +1091,21 @@ function Menu-Apps([hashtable]$Cfg, [switch]$Wizard) {
     $isHome = Test-IsHomeEdition
     Write-Title 'Apper og spill'
     if ($isHome) {
-        Write-Warn "Windows-utgave: $(Get-EditionName). Bruker Software Restriction Policies (svakere enn AppLocker)."
+        Write-Warn "Windows-utgave: {0}. Bruker Software Restriction Policies (svakere enn AppLocker)." $(Get-EditionName)
     } else {
-        Write-Info "Windows-utgave: $(Get-EditionName). Bruker AppLocker."
+        Write-Info "Windows-utgave: {0}. Bruker AppLocker." $(Get-EditionName)
     }
-    Write-Info 'Når dette er på, kan barnet bare starte programmer som er installert av en voksen'
-    Write-Info '(i Windows og Program Files). Programmer i Nedlastinger, AppData og på minnepinner starter'
-    Write-Info 'ikke, så barnet kan ikke installere eller kjøre nye programmer, spill, nettlesere eller VPN.'
+    Write-Info 'Når dette er på, kan barnet bare starte programmer som en voksen har installert (i Windows og Program Files).'
+    Write-Info 'Programmer i Nedlastinger, AppData og på minnepinner starter ikke.'
+    Write-Info 'Barnet kan derfor ikke installere eller kjøre nye programmer, spill, nettlesere eller VPN.'
     if ($Wizard -or -not $Cfg.Apps.Enabled) {
         $Cfg.Apps.Enabled = Read-YesNo 'Slå på sperre for installering og ukjente programmer?' $true
         if (-not $Cfg.Apps.Enabled) { Save-Config $Cfg; Apply-Apps $Cfg; return }
         $Cfg.Apps.BlockStore = Read-YesNo 'Sperre Microsoft Store og App Installer (winget) for barnet?' $true
         $Cfg.Apps.BlockXbox = Read-YesNo 'Sperre Xbox-appen (den kan installere spill uten passord)?' $true
         $Cfg.Apps.BlockTools = Read-YesNo 'Sperre kommandolinje, PowerShell og andre verktøy som kan omgå sperrene? (Slå av hvis et spill ikke vil starte.)' $true
-        Write-Info 'Neste valg gjelder alle standardbrukere, ikke bare barnet. Bruker du selv en standardkonto til'
-        Write-Info 'hverdags, må du da logge på administratorkontoen for å gjøre endringer.'
+        Write-Info 'Neste valg gjelder alle standardbrukere, ikke bare barnet.'
+        Write-Info 'Bruker du selv en standardkonto til hverdags, må du logge på administratorkontoen for å gjøre endringer.'
         $Cfg.Apps.StrictUac = Read-YesNo 'Avvise "Kjør som administrator" i barnets økt automatisk (anbefalt)?' $true
     }
     Write-Info 'Leter etter installerte programmer og spill (kan ta litt tid) ...'
@@ -1054,37 +1115,37 @@ function Menu-Apps([hashtable]$Cfg, [switch]$Wizard) {
     $games = @($cands | Where-Object { $_.Kind -ne 'Program' })
     if ($Wizard -and $games.Count) {
         Write-Host ''
-        Write-Info "Fant $($games.Count) spill, spillklienter og antijuks-tjenester (for eksempel Steam, Epic/Fortnite, EA/Battlefield)."
+        Write-Info "Fant {0} spill, spillklienter og antijuks-tjenester (for eksempel Steam, Epic/Fortnite, EA/Battlefield)." $($games.Count)
         if (Read-YesNo 'Tillate alle sammen, så spillene starter og oppdateres som vanlig?' $true) { Enable-AllGames $Cfg $cands }
     }
     while ($true) {
         Write-Title 'Apper og spill: velg hva barnet får bruke'
         $rows = @()
-        $kindTxt = @{ Spill = 'Spill'; Spillklient = 'Spillklient'; Spilltjeneste = 'Antijuks/tjeneste'; Program = 'Program' }
+        $kindTxt = @{ Spill = (T 'Spill'); Spillklient = (T 'Spillklient'); Spilltjeneste = (T 'Antijuks/tjeneste'); Program = (T 'Program') }
         foreach ($c in $cands) {
             if ($c.Protected) { $ok = -not (Test-UnderAny $c.Dir @($Cfg.Apps.DenyPaths)) }
             else { $ok = Test-UnderAny $c.Dir @($Cfg.Apps.AllowPaths) }
             $label = "[$($kindTxt[$c.Kind])] $($c.Name)"
-            $rows += [pscustomobject]@{ Type = 'dir'; Item = $c; Ok = $ok; Label = $label; Note = $(if ($c.Protected) { '' } else { '(mappe barnet kan skrive i)' }) }
+            $rows += [pscustomobject]@{ Type = 'dir'; Item = $c; Ok = $ok; Label = $label; Note = $(if ($c.Protected) { '' } else { T '(mappe barnet kan skrive i)' }) }
         }
         foreach ($s in $store) {
             $ok = -not (@($Cfg.Apps.DenyPackages | Where-Object { $_.Name -eq $s.Name }).Count)
-            $rows += [pscustomobject]@{ Type = 'appx'; Item = $s; Ok = $ok; Label = "Store-app: $($s.Name)"; Note = '' }
+            $rows += [pscustomobject]@{ Type = 'appx'; Item = $s; Ok = $ok; Label = (T 'Store-app: {0}' $s.Name); Note = '' }
         }
         for ($i = 0; $i -lt $rows.Count; $i++) {
             $r = $rows[$i]
-            $mark = if ($r.Ok) { 'TILLATT ' } else { 'SPERRET ' }
+            $mark = if ($r.Ok) { (T 'tillatt').ToUpper().PadRight(14) } else { (T 'sperret').ToUpper().PadRight(14) }
             $col = if ($r.Ok) { 'Green' } else { 'Red' }
             Write-Host ("  {0,3}. " -f ($i + 1)) -NoNewline
             Write-Host $mark -ForegroundColor $col -NoNewline
             Write-Host " $($r.Label) $($r.Note)"
         }
         Write-Host ''
-        Write-Info "Store: $(if ($Cfg.Apps.BlockStore) {'sperret'} else {'tillatt'}),  Xbox-appen: $(if ($Cfg.Apps.BlockXbox) {'sperret'} else {'tillatt'})"
-        Write-Host '  Skriv numre for å bytte mellom tillatt/sperret (for eksempel 2,5,7-9).'
-        Write-Host '  G = tillat alle spill, spillklienter og antijuks (anbefalt så spillene virker som de skal)'
-        Write-Host '  S = bytt Store,  X = bytt Xbox-appen,  M = legg til mappe selv,  Enter = ferdig'
-        $a = (Read-Host 'Valg').Trim()
+        Write-Info "Store: {0},  Xbox-appen: {1}" $(if ($Cfg.Apps.BlockStore) { T 'sperret' } else { T 'tillatt' }) $(if ($Cfg.Apps.BlockXbox) { T 'sperret' } else { T 'tillatt' })
+        Write-Host (T '  Skriv numre for å bytte mellom tillatt/sperret (for eksempel 2,5,7-9).')
+        Write-Host (T '  G = tillat alle spill, spillklienter og antijuks (anbefalt så spillene virker som de skal)')
+        Write-Host (T '  S = bytt Store,  X = bytt Xbox-appen,  M = legg til mappe selv,  Enter = ferdig')
+        $a = (Read-Host (T 'Valg')).Trim()
         if ($a -eq '') { break }
         if ($a -ieq 'g') { Enable-AllGames $Cfg $cands; continue }
         if ($a -ieq 's') { $Cfg.Apps.BlockStore = -not $Cfg.Apps.BlockStore; continue }
@@ -1115,7 +1176,7 @@ function Menu-Apps([hashtable]$Cfg, [switch]$Wizard) {
             } else {
                 if ($r.Ok) { $Cfg.Apps.AllowPaths = @($Cfg.Apps.AllowPaths | Where-Object { $_ -ne $r.Item.Dir }) }
                 else {
-                    Write-Warn "Barnet kan legge egne programmer i '$($r.Item.Dir)'. Å tillate den åpner et lite hull i sperren."
+                    Write-Warn "Barnet kan legge egne programmer i '{0}'. Å tillate den åpner et lite hull i sperren." $($r.Item.Dir)
                     if (Read-YesNo 'Tillate likevel?' $true) { $Cfg.Apps.AllowPaths = @($Cfg.Apps.AllowPaths) + @($r.Item.Dir) }
                 }
             }
@@ -1134,10 +1195,10 @@ function Enable-AllGames([hashtable]$Cfg, $Cands) {
         if (@($Cfg.Apps.AllowPaths) -notcontains $g.Dir) { $Cfg.Apps.AllowPaths = @($Cfg.Apps.AllowPaths) + @($g.Dir) }
     }
     $open = @($games | Where-Object { -not $_.Protected })
-    Write-Ok "$($games.Count) spill og spillklienter er tillatt."
+    Write-Ok "{0} spill og spillklienter er tillatt." $($games.Count)
     if ($open.Count) {
-        Write-Warn "$($open.Count) av dem ligger i mapper barnet kan skrive i (typisk Steam). Barnet kan i teorien legge"
-        Write-Warn 'egne programmer der. Vil du stenge det, sperr dem igjen med nummeret i listen.'
+        Write-Warn "{0} av dem ligger i mapper barnet kan skrive i (typisk Steam), så barnet kan i teorien legge egne programmer der." $($open.Count)
+        Write-Warn 'Vil du stenge det, sperr dem igjen med nummeret i listen.'
     }
 }
 
@@ -1256,10 +1317,10 @@ function Set-StoreForChildHome([hashtable]$Cfg) {
             foreach ($p in @(Get-AppxPackage -Name $n -User $c.Sid -ErrorAction SilentlyContinue)) {
                 try {
                     Remove-AppxPackage -Package $p.PackageFullName -User $c.Sid -ErrorAction Stop
-                    Write-Ok "$n er fjernet for $($c.Name)."
+                    Write-Ok "{0} er fjernet for {1}." $n $($c.Name)
                     $Cfg.Backup.StoreRemovedFor = @($Cfg.Backup.StoreRemovedFor) + @("$($c.Name): $n")
                 }
-                catch { Write-Warn "Kunne ikke fjerne $n for $($c.Name): $($_.Exception.Message)" }
+                catch { Write-Warn "Kunne ikke fjerne {0} for {1}: {2}" $n $($c.Name) $($_.Exception.Message) }
             }
         }
     }
@@ -1350,30 +1411,36 @@ function Test-PrefixSsid([hashtable]$Cfg, [string]$Ssid) {
 
 function Format-Prefixes([hashtable]$Cfg) {
     $p = @($Cfg.Wifi.BlockPrefixes | Where-Object { $_ })
-    if ($p.Count -eq 0) { return 'ingen' }
+    if ($p.Count -eq 0) { return (T 'ingen') }
     return (($p | ForEach-Object { "${_}1, ${_}2, ${_}3 ..." }) -join '; ')
 }
+
+function Get-WifiModeTexts {
+    return @{ off = (T 'filteret er av'); allow = (T 'bare valgte nettverk er tillatt'); block = (T 'valgte nettverk er sperret') }
+}
+
+function Format-Bool($Value) { if ($Value) { return (T 'ja') } return (T 'nei') }
 
 function Menu-Wifi([hashtable]$Cfg) {
     Write-Title 'Trådløse nettverk'
     if (-not (Test-HasWifi)) { Write-Warn 'Fant ingen Wi-Fi på denne PC-en.' }
     Write-Info 'Filteret gjelder hele PC-en (også voksne), men bare administratorer kan endre det.'
-    $modeTxt = @{ off = 'av'; allow = 'bare valgte nettverk er tillatt'; block = 'valgte nettverk er sperret' }
-    Write-Info "Nå: $($modeTxt[$Cfg.Wifi.Mode]) $(if (@($Cfg.Wifi.Ssids).Count) { '(' + (@($Cfg.Wifi.Ssids) -join ', ') + ')' })"
-    Write-Info "Alltid sperret (navn pluss tall): $(Format-Prefixes $Cfg)"
+    $modeTxt = Get-WifiModeTexts
+    Write-Info "Nå: {0} {1}" $($modeTxt[$Cfg.Wifi.Mode]) $(if (@($Cfg.Wifi.Ssids).Count) { '(' + (@($Cfg.Wifi.Ssids) -join ', ') + ')' })
+    Write-Info "Alltid sperret (navn pluss tall): {0}" $(Format-Prefixes $Cfg)
     Write-Host ''
-    Write-Host '  1. Bare tillat nettverk jeg velger (anbefalt: hjemme, skole, besteforeldre)'
-    Write-Host '  2. Sperr bestemte nettverk'
-    Write-Host '  3. Slå av Wi-Fi-filteret (alltid sperrede navn er fortsatt sperret)'
-    Write-Host '  4. Endre navn som alltid er sperret'
-    Write-Host '  0. Ingen endring'
-    $choice = Read-Host 'Valg'
+    Write-Host (T '  1. Bare tillat nettverk jeg velger (anbefalt: hjemme, skole, besteforeldre)')
+    Write-Host (T '  2. Sperr bestemte nettverk')
+    Write-Host (T '  3. Slå av Wi-Fi-filteret (alltid sperrede navn er fortsatt sperret)')
+    Write-Host (T '  4. Endre navn som alltid er sperret')
+    Write-Host (T '  0. Ingen endring')
+    $choice = Read-Host (T 'Valg')
     if ($choice -eq '3') { $Cfg.Wifi.Mode = 'off'; $Cfg.Wifi.Ssids = @() }
     elseif ($choice -eq '4') {
         Write-Info 'Skriv navn uten tall, skilt med komma. "Anlegg" sperrer Anlegg1, Anlegg2 og så videre.'
-        Write-Info 'Skriv "ingen" for å ikke sperre noen navn automatisk.'
+        Write-Info 'Skriv "{0}" for å ikke sperre noen navn automatisk.' (T 'ingen')
         $a = Read-Text 'Navn' ((@($Cfg.Wifi.BlockPrefixes) -join ', '))
-        if ($a -ieq 'ingen') { $Cfg.Wifi.BlockPrefixes = @() }
+        if (Test-NoLimitWord $a) { $Cfg.Wifi.BlockPrefixes = @() }
         else { $Cfg.Wifi.BlockPrefixes = @($a -split '\s*,\s*' | Where-Object { $_ } | Sort-Object -Unique) }
     }
     elseif ($choice -in @('1', '2')) {
@@ -1381,15 +1448,16 @@ function Menu-Wifi([hashtable]$Cfg) {
         $names = @(@($saved | ForEach-Object { $_.Ssid }) + (Get-VisibleSsids) + @($Cfg.Wifi.Ssids) | Where-Object { $_ } | Sort-Object -Unique)
         $current = Get-CurrentSsid
         if (-not $current -and (Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -and $_.PhysicalMediaType -match '802\.11' })) {
-            Write-Warn 'Windows viser ikke navnet på nettverket du er koblet til. Det skjer ofte når posisjonstjenester er av'
-            Write-Warn '(Innstillinger > Personvern og sikkerhet > Plassering). Pass på at ditt eget nettverk er med i listen.'
+            Write-Warn 'Windows viser ikke navnet på nettverket du er koblet til.'
+            Write-Warn 'Det skjer ofte når posisjonstjenester er slått av i personverninnstillingene i Windows.'
+            Write-Warn 'Pass på at ditt eget nettverk er med i listen.'
         }
         for ($i = 0; $i -lt $names.Count; $i++) {
-            $tag = if ($names[$i] -eq $current) { ' (tilkoblet nå)' } else { '' }
+            $tag = if ($names[$i] -eq $current) { ' ' + (T '(tilkoblet nå)') } else { '' }
             Write-Host ("  {0,3}. {1}{2}" -f ($i + 1), $names[$i], $tag)
         }
-        $verb = if ($choice -eq '1') { 'tillate' } else { 'sperre' }
-        $sel = @(Read-Numbers "Hvilke vil du $verb? (numre, for eksempel 1,3)" $names.Count | ForEach-Object { $names[$_ - 1] })
+        $q = if ($choice -eq '1') { 'Hvilke nettverk vil du tillate? (numre, for eksempel 1,3)' } else { 'Hvilke nettverk vil du sperre? (numre, for eksempel 1,3)' }
+        $sel = @(Read-Numbers $q $names.Count | ForEach-Object { $names[$_ - 1] })
         while ($true) {
             $extra = Read-Text 'Legg til et nettverksnavn som ikke står i listen (Enter = ferdig)'
             if (-not $extra) { break }
@@ -1397,8 +1465,8 @@ function Menu-Wifi([hashtable]$Cfg) {
         }
         if ($choice -eq '1') {
             if ($current -and $sel -notcontains $current) {
-                Write-Warn "Nettverket du er koblet til nå ('$current') er ikke valgt. PC-en mister nettet."
-                if (Read-YesNo "Ta med '$current'?" $true) { $sel += $current }
+                Write-Warn "Nettverket du er koblet til nå ('{0}') er ikke valgt. PC-en mister nettet." $current
+                if (Read-YesNo (T "Ta med '{0}'?" $current) $true) { $sel += $current }
             }
             if ($sel.Count -eq 0) { Write-Err 'Du må velge minst ett nettverk.'; Wait-Key; return }
             $Cfg.Wifi.Mode = 'allow'
@@ -1439,7 +1507,7 @@ function Apply-Wifi([hashtable]$Cfg, [switch]$Remove) {
         $perm = if ($mode -eq 'allow') { 'allow' } else { 'block' }
         foreach ($s in $Cfg.Wifi.Ssids) {
             $r = Invoke-Native $netsh "wlan add filter permission=$perm ssid=`"$s`" networktype=infrastructure"
-            if ($r.ExitCode -ne 0) { Write-Warn "Wi-Fi-filter for '$s' feilet: $($r.Output.Trim())" }
+            if ($r.ExitCode -ne 0) { Write-Warn "Wi-Fi-filter for '{0}' feilet: {1}" $s $($r.Output.Trim()) }
         }
         if ($mode -eq 'allow') { [void](Invoke-Native $netsh 'wlan add filter permission=denyall networktype=infrastructure') }
         [void](Invoke-Native $netsh 'wlan add filter permission=denyall networktype=adhoc')
@@ -1450,7 +1518,8 @@ function Apply-Wifi([hashtable]$Cfg, [switch]$Remove) {
             }
         }
         $Cfg.Wifi.AppliedMode = $mode; $Cfg.Wifi.AppliedSsids = @($Cfg.Wifi.Ssids)
-        Write-Ok "Wi-Fi-filter: $(if ($mode -eq 'allow') {'bare'} else {'sperret:'}) $(@($Cfg.Wifi.Ssids) -join ', ')"
+        if ($mode -eq 'allow') { Write-Ok 'Wi-Fi-filter: bare {0}' (@($Cfg.Wifi.Ssids) -join ', ') }
+        else { Write-Ok 'Wi-Fi-filter: sperret: {0}' (@($Cfg.Wifi.Ssids) -join ', ') }
     } else {
         Write-Ok 'Wi-Fi-filteret er av.'
     }
@@ -1471,7 +1540,7 @@ function Apply-Wifi([hashtable]$Cfg, [switch]$Remove) {
         foreach ($p in ($saved | Where-Object { Test-PrefixSsid $Cfg $_.Ssid })) {
             [void](Invoke-Native $netsh "wlan delete profile name=`"$($p.Profile)`"")
         }
-        Write-Ok "Alltid sperret: $(Format-Prefixes $Cfg)"
+        Write-Ok "Alltid sperret: {0}" $(Format-Prefixes $Cfg)
         # Håndheveren sperrer høyere tall (for eksempel Anlegg51) når de dukker opp.
         if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) { Install-Files; Register-EnforcerTask }
     }
@@ -1507,19 +1576,21 @@ function Apply-Wifi([hashtable]$Cfg, [switch]$Remove) {
 function Menu-Web([hashtable]$Cfg, [switch]$Wizard) {
     Write-Title 'Nettfilter (voksensider, SafeSearch, DNS)'
     Write-Info 'PC-en bruker en familievennlig DNS-tjeneste som sperrer voksensider. Det gjelder hele PC-en.'
-    Write-Info 'Nettleserne (Edge, Chrome, Brave, Firefox) får i barnets konto: ingen privat modus, tvunget'
-    Write-Info 'SafeSearch og YouTube begrenset modus, ingen utvidelser (stopper VPN-utvidelser) og ingen egen DNS.'
+    Write-Info 'Nettleserne (Edge, Chrome, Brave, Firefox) får disse reglene i barnets konto:'
+    Write-Info ' * ingen privat modus og ingen utvidelser (det stopper også VPN-utvidelser)'
+    Write-Info ' * SafeSearch og begrenset modus på YouTube er alltid på'
+    Write-Info ' * nettleseren kan ikke bruke sin egen DNS'
     $Cfg.Web.Enabled = Read-YesNo 'Slå på nettfilteret?' $true
     if ($Cfg.Web.Enabled) {
         $keys = @($DnsProviders.Keys)
         for ($i = 0; $i -lt $keys.Count; $i++) {
             $p = $DnsProviders[$keys[$i]]
-            $tag = if ($i -eq 0) { ' (anbefalt)' } else { '' }
-            Write-Host ("  {0}. {1}{2}: {3}" -f ($i + 1), $p.Name, $tag, $p.Note)
+            $tag = if ($i -eq 0) { ' ' + (T '(anbefalt)') } else { '' }
+            Write-Host ("  {0}. {1}{2}: {3}" -f ($i + 1), $p.Name, $tag, (T $p.Note))
         }
         $cur = [array]::IndexOf($keys, $Cfg.Web.Provider) + 1
         if ($cur -lt 1) { $cur = 1 }
-        $n = Read-Numbers "Velg DNS-filter [$cur]" $keys.Count
+        $n = Read-Numbers (T "Velg DNS-filter [{0}]" $cur) $keys.Count
         if ($n.Count) { $Cfg.Web.Provider = $keys[$n[0] - 1] }
         $Cfg.Web.BrowserPolicies = Read-YesNo 'Sette sperrer i nettleserne for barnet?' $true
         $Cfg.Web.BlockPublicDns = Read-YesNo 'Sperre andre kjente DNS-tjenere i brannmuren (så filteret ikke kan omgås)?' $true
@@ -1551,7 +1622,7 @@ function Apply-Web([hashtable]$Cfg, [switch]$Remove) {
             $v6 = $false
             try { $v6 = [bool](Get-NetAdapterBinding -Name $nic.Name -ComponentID ms_tcpip6 -ErrorAction Stop).Enabled } catch { }
             $list = @($Cfg.Web.Servers | Where-Object { $v6 -or $_ -notlike '*:*' })
-            try { Set-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -ServerAddresses $list } catch { Write-Warn "DNS på '$($nic.Name)': $($_.Exception.Message)" }
+            try { Set-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -ServerAddresses $list } catch { Write-Warn "DNS på '{0}': {1}" $($nic.Name) $($_.Exception.Message) }
         }
         if (Get-Command Add-DnsClientDohServerAddress -ErrorAction SilentlyContinue) {
             foreach ($ip in $Cfg.Web.Servers) {
@@ -1572,7 +1643,7 @@ function Apply-Web([hashtable]$Cfg, [switch]$Remove) {
                 -Direction Outbound -Action Block -Protocol UDP -RemotePort @('53', '443', '853', '5443', '8443') -RemoteAddress $PublicDns -Profile Any | Out-Null
         }
         Clear-DnsClientCache
-        Write-Ok "Nettfilter: $($p.Name) ($(@($p.V4) -join ', '))"
+        Write-Ok "Nettfilter: {0} ({1})" $($p.Name) $(@($p.V4) -join ', ')
     } else {
         foreach ($nic in $nics) {
             $key = [string]$nic.InterfaceGuid
@@ -1673,7 +1744,7 @@ function Set-TimeZonePrivilege([hashtable]$Cfg, [bool]$Restrict) {
     $inf = "[Unicode]`r`nUnicode=yes`r`n[Version]`r`nsignature=`"`$CHICAGO`$`"`r`nRevision=1`r`n[Privilege Rights]`r`n$new`r`n"
     Set-Content -LiteralPath $imp -Value $inf -Encoding Unicode
     $r = Invoke-Native "$env:windir\System32\secedit.exe" "/configure /db `"$db`" /cfg `"$imp`" /areas USER_RIGHTS /quiet"
-    if ($r.ExitCode -ne 0) { Write-Warn "secedit: $($r.Output.Trim())" } elseif (-not $Restrict) { $Cfg.Backup.TimeZoneLine = '' }
+    if ($r.ExitCode -ne 0) { Write-Warn "secedit: {0}" $($r.Output.Trim()) } elseif (-not $Restrict) { $Cfg.Backup.TimeZoneLine = '' }
     Remove-Item -LiteralPath $dir -Recurse -Force
 }
 
@@ -1684,11 +1755,11 @@ function Apply-Extra([hashtable]$Cfg, [switch]$Remove) {
     if ($Cfg.Extra.WinRE -and -not $Remove) {
         $r = Invoke-Native "$env:windir\System32\reagentc.exe" '/disable'
         if ($r.ExitCode -eq 0) { $Cfg.Backup.WinREDisabledByUs = $true; Write-Ok 'Gjenopprettingsmiljøet er slått av.' }
-        else { Write-Warn "reagentc: $($r.Output.Trim())" }
+        else { Write-Warn "reagentc: {0}" $($r.Output.Trim()) }
     } elseif ($Cfg.Backup.WinREDisabledByUs) {
         $r = Invoke-Native "$env:windir\System32\reagentc.exe" '/enable'
         if ($r.ExitCode -eq 0) { $Cfg.Backup.WinREDisabledByUs = $false; Write-Ok 'Gjenopprettingsmiljøet er slått på igjen.' }
-        else { Write-Warn "reagentc: $($r.Output.Trim())" }
+        else { Write-Warn "reagentc: {0}" $($r.Output.Trim()) }
     }
     if (-not $Remove) { foreach ($c in $Cfg.Children) { Set-ChildHive $c $Cfg @() } }
     Save-Config $Cfg
@@ -1698,55 +1769,55 @@ function Apply-Extra([hashtable]$Cfg, [switch]$Remove) {
 
 function Show-Status([hashtable]$Cfg) {
     Write-Title 'Status'
-    Write-Host '  Barnekontoer' -ForegroundColor White
+    Write-Host (T '  Barnekontoer') -ForegroundColor White
     Show-Children $Cfg
 
-    Write-Host "`n  Skjermtid" -ForegroundColor White
+    Write-Host ("`n" + (T '  Skjermtid')) -ForegroundColor White
     $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    if ($Cfg.ScreenTime.Enabled) { Write-Ok 'På' } else { Write-Info 'Av' }
+    if ($Cfg.ScreenTime.Enabled) { Write-Ok 'Slått på' } else { Write-Info 'Slått av' }
     if ($task) {
         $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
-        Write-Info "Håndhever-oppgaven: $($task.State), sist kjørt $($info.LastRunTime), resultat $($info.LastTaskResult)"
+        Write-Info "Håndhever-oppgaven: {0}, sist kjørt {1}, resultat {2}" $($task.State) $($info.LastRunTime) $($info.LastTaskResult)
     } elseif ($Cfg.ScreenTime.Enabled -or $Cfg.Web.Enabled) { Write-Err 'Håndhever-oppgaven mangler. Velg "Bruk alle innstillinger på nytt".' }
     Show-UsageToday $Cfg
 
-    Write-Host "`n  Apper og spill" -ForegroundColor White
-    if (-not $Cfg.Apps.Enabled) { Write-Info 'Av' }
+    Write-Host ("`n" + (T '  Apper og spill')) -ForegroundColor White
+    if (-not $Cfg.Apps.Enabled) { Write-Info 'Slått av' }
     elseif (Test-IsHomeEdition) { Write-Ok 'På (Software Restriction Policies i barnets profil)' }
     else {
         try {
             $pol = Get-AppLockerPolicy -Effective
             foreach ($rc in $pol.RuleCollections) { Write-Info ("{0,-7} {1,-14} {2} regler" -f $rc.RuleCollectionType, $rc.EnforcementMode, @($rc).Count) }
-        } catch { Write-Warn "Kunne ikke lese AppLocker: $($_.Exception.Message)" }
+        } catch { Write-Warn "Kunne ikke lese AppLocker: {0}" $($_.Exception.Message) }
         $svc = Get-Service AppIDSvc -ErrorAction SilentlyContinue
-        if ($svc.Status -eq 'Running') { Write-Ok 'Tjenesten Application Identity kjører' } else { Write-Err "Tjenesten Application Identity: $($svc.Status)" }
+        if ($svc.Status -eq 'Running') { Write-Ok 'Tjenesten Application Identity kjører' } else { Write-Err "Tjenesten Application Identity: {0}" $($svc.Status) }
     }
-    Write-Info "Sperret for barnet: $(@($Cfg.Apps.DenyPaths).Count) mapper, $(@($Cfg.Apps.DenyPackages).Count) Store-apper. Ekstra tillatt: $(@($Cfg.Apps.AllowPaths).Count) mapper."
+    Write-Info "Sperret for barnet: {0} mapper, {1} Store-apper. Ekstra tillatt: {2} mapper." $(@($Cfg.Apps.DenyPaths).Count) $(@($Cfg.Apps.DenyPackages).Count) $(@($Cfg.Apps.AllowPaths).Count)
 
-    Write-Host "`n  Trådløse nettverk" -ForegroundColor White
-    Write-Info "Modus: $($Cfg.Wifi.Mode) $(@($Cfg.Wifi.Ssids) -join ', ')"
-    Write-Info "Alltid sperret: $(Format-Prefixes $Cfg)"
+    Write-Host ("`n" + (T '  Trådløse nettverk')) -ForegroundColor White
+    Write-Info "Modus: {0} {1}" $((Get-WifiModeTexts)[$Cfg.Wifi.Mode]) $(@($Cfg.Wifi.Ssids) -join ', ')
+    Write-Info "Alltid sperret: {0}" $(Format-Prefixes $Cfg)
     $f = Invoke-Native "$env:windir\System32\netsh.exe" 'wlan show filters'
     foreach ($l in ($f.Output -split "`r?`n" | Where-Object { $_.Trim() })) { Write-Info $l.TrimEnd() }
 
-    Write-Host "`n  Nettfilter" -ForegroundColor White
+    Write-Host ("`n" + (T '  Nettfilter')) -ForegroundColor White
     foreach ($nic in @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue)) {
         $dns = @(Get-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses }) -join ', '
-        Write-Info "$($nic.Name) ($($nic.Status)): $dns"
+        Write-Info "{0} ({1}): {2}" $($nic.Name) $($nic.Status) $dns
     }
 
-    Write-Host "`n  VPN og brannmur" -ForegroundColor White
+    Write-Host ("`n" + (T '  VPN og brannmur')) -ForegroundColor White
     $fw = @(Get-NetFirewallRule -Group $FwGroup -ErrorAction SilentlyContinue)
-    Write-Info "Brannmurregler fra foreldrekontrollen: $($fw.Count)"
+    Write-Info "Brannmurregler fra foreldrekontrollen: {0}" $($fw.Count)
     foreach ($s in @('RasMan', 'SstpSvc', 'AppIDSvc')) {
         $svc = Get-Service $s -ErrorAction SilentlyContinue
-        if ($svc) { Write-Info "Tjeneste ${s}: $($svc.StartType), $($svc.Status)" }
+        if ($svc) { Write-Info "Tjeneste {0}: {1}, {2}" $s $($svc.StartType) $($svc.Status) }
     }
 
-    Write-Host "`n  Ekstra" -ForegroundColor White
-    Write-Info "Tidssone sperret: $([bool]$Cfg.Extra.TimeZone),  regedit sperret: $([bool]$Cfg.Extra.RegEdit),  WinRE av: $([bool]$Cfg.Backup.WinREDisabledByUs)"
+    Write-Host ("`n" + (T '  Ekstra')) -ForegroundColor White
+    Write-Info "Tidssone sperret: {0},  regedit sperret: {1},  WinRE av: {2}" (Format-Bool $Cfg.Extra.TimeZone) (Format-Bool $Cfg.Extra.RegEdit) (Format-Bool $Cfg.Backup.WinREDisabledByUs)
 
-    Write-Host "`n  Kjente begrensninger" -ForegroundColor White
+    Write-Host ("`n" + (T '  Kjente begrensninger')) -ForegroundColor White
     Write-Info 'DNS-filter, Wi-Fi-filter og VPN-sperre gjelder hele PC-en, også voksne.'
     Write-Info 'Steam/Epic som er tillatt for barnet kan fortsatt hente gratisspill inne i klienten (bruk Steam Family View).'
     Write-Info 'Sikkermodus og oppstart fra USB stoppes bare helt med BIOS-passord og BitLocker.'
@@ -1765,7 +1836,7 @@ function Invoke-ApplyAll([hashtable]$Cfg) {
         @{ N = 'Ekstra';       S = { Apply-Extra $Cfg } }
     )
     foreach ($s in $steps) {
-        try { & $s.S } catch { Write-Err "$($s.N): $($_.Exception.Message)" }
+        try { & $s.S } catch { Write-Err "{0}: {1}" (T $s.N) $($_.Exception.Message) }
     }
     Save-Config $Cfg
 }
@@ -1786,10 +1857,10 @@ function Invoke-RemoveAll([hashtable]$Cfg) {
         @{ N = 'VPN';        S = { Apply-Vpn $Cfg -Remove } }
         @{ N = 'Ekstra';     S = { Apply-Extra $Cfg -Remove } }
         @{ N = 'Brannmur';   S = { Get-NetFirewallRule -Group $FwGroup -ErrorAction SilentlyContinue | Remove-NetFirewallRule } }
-        @{ N = 'Barnas profiler'; S = { foreach ($c in $Cfg.Children) { if (Get-LocalUser -SID $c.Sid -ErrorAction SilentlyContinue) { Set-ChildHive $c $Cfg @() $true; Write-Ok "Sperrer fjernet fra profilen til $($c.Name)." } } } }
+        @{ N = 'Barnas profiler'; S = { foreach ($c in $Cfg.Children) { if (Get-LocalUser -SID $c.Sid -ErrorAction SilentlyContinue) { Set-ChildHive $c $Cfg @() $true; Write-Ok "Sperrer fjernet fra profilen til {0}." $($c.Name) } } } }
     )
     foreach ($s in $steps) {
-        try { & $s.S } catch { Write-Err "$($s.N): $($_.Exception.Message)" }
+        try { & $s.S } catch { Write-Err "{0}: {1}" (T $s.N) $($_.Exception.Message) }
     }
     # Gjenstående sikkerhetskopier (for eksempel verdier fra tidligere versjoner).
     foreach ($k in @($Cfg.Backup.Registry.Keys)) { $p = $k.Split('|'); Restore-ManagedHklm $Cfg $p[0] $p[1] }
@@ -1800,16 +1871,16 @@ function Invoke-RemoveAll([hashtable]$Cfg) {
     if ((Test-IsHomeEdition) -and @($Cfg.Children).Count) {
         $gone = @($Cfg.Backup.StoreRemovedFor | Sort-Object -Unique)
         if ($gone.Count) {
-            Write-Info "Windows Home: disse appene ble fjernet for barnet: $($gone -join ', ')"
+            Write-Info "Windows Home: disse appene ble fjernet for barnet: {0}" $($gone -join ', ')
             Write-Info 'Logg inn som barnet og kjør wsreset -i for å få Store tilbake, og installer de andre fra Store.'
             $Cfg.Backup.StoreRemovedFor = @()
         }
     }
     foreach ($c in @($Cfg.Children)) {
-        if ((Get-LocalUser -SID $c.Sid -ErrorAction SilentlyContinue) -and (Read-YesNo "Slette kontoen $($c.Name) også (filene i profilen blir liggende)?" $false)) {
+        if ((Get-LocalUser -SID $c.Sid -ErrorAction SilentlyContinue) -and (Read-YesNo (T "Slette kontoen {0} også (filene i profilen blir liggende)?" $($c.Name)) $false)) {
             Remove-LocalUser -SID $c.Sid
             $Cfg.Children = @($Cfg.Children | Where-Object { $_.Sid -ne $c.Sid })
-            Write-Ok "Kontoen $($c.Name) er slettet."
+            Write-Ok "Kontoen {0} er slettet." $($c.Name)
         }
     }
     Save-Config $Cfg
@@ -1839,36 +1910,39 @@ function Invoke-Wizard([hashtable]$Cfg) {
 
 function Show-Menu {
     Write-Host ''
-    Write-Host '  FORELDREKONTROLL FOR WINDOWS 11' -ForegroundColor Cyan
+    Write-Host (T '  FORELDREKONTROLL FOR WINDOWS 11') -ForegroundColor Cyan
     Write-Host ''
-    Write-Host '   H. Hurtigoppsett (anbefalt første gang)'
-    Write-Host '   1. Barnekontoer'
-    Write-Host '   2. Skjermtid'
-    Write-Host '   3. Apper og spill'
-    Write-Host '   4. Trådløse nettverk'
-    Write-Host '   5. Nettfilter (voksensider, SafeSearch, DNS)'
-    Write-Host '   6. VPN og proxy'
-    Write-Host '   7. Ekstra sikring'
-    Write-Host '   8. Gi ekstra tid i dag'
-    Write-Host '   9. Vis status'
-    Write-Host '  10. Bruk alle innstillinger på nytt'
-    Write-Host '  11. Fjern all foreldrekontroll'
-    Write-Host '   0. Avslutt'
+    Write-Host (T '   H. Hurtigoppsett (anbefalt første gang)')
+    Write-Host (T '   1. Barnekontoer')
+    Write-Host (T '   2. Skjermtid')
+    Write-Host (T '   3. Apper og spill')
+    Write-Host (T '   4. Trådløse nettverk')
+    Write-Host (T '   5. Nettfilter (voksensider, SafeSearch, DNS)')
+    Write-Host (T '   6. VPN og proxy')
+    Write-Host (T '   7. Ekstra sikring')
+    Write-Host (T '   8. Gi ekstra tid i dag')
+    Write-Host (T '   9. Vis status')
+    Write-Host (T '  10. Bruk alle innstillinger på nytt')
+    Write-Host (T '  11. Fjern all foreldrekontroll')
+    Write-Host '   L. Språk / Мова'
+    Write-Host (T '   0. Avslutt')
 }
 
 function Start-Main {
     if (-not (Test-IsAdmin)) {
-        Write-Host 'Skriptet må kjøres som administrator. Starter på nytt med administratorrettigheter ...'
+        Write-Host 'Skriptet må kjøres som administrator ... / Скрипт потрібно запускати від імені адміністратора ...'
         $args2 = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
         if ($BrukPaaNytt) { $args2 += ' -BrukPaaNytt' }
         Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList $args2 -Verb RunAs
         return
     }
     $cfg = Get-Config
+    if ($cfg.Language) { Import-Language $cfg.Language }
+    elseif (-not $BrukPaaNytt) { Select-Language $cfg; Save-Config $cfg }
     if ($BrukPaaNytt) { Invoke-ApplyAll $cfg; return }
     while ($true) {
         Show-Menu
-        $c = (Read-Host "`n  Valg").Trim()
+        $c = (Read-Host ("`n" + (T '  Valg'))).Trim()
         try {
             switch ($c) {
                 { $_ -ieq 'h' } { Invoke-Wizard $cfg; Wait-Key }
@@ -1883,11 +1957,12 @@ function Start-Main {
                 '9'  { Show-Status $cfg; Wait-Key }
                 '10' { Invoke-ApplyAll $cfg; Wait-Key }
                 '11' { Invoke-RemoveAll $cfg; Wait-Key }
+                { $_ -ieq 'l' } { Select-Language $cfg; Save-Config $cfg }
                 '0'  { return }
             }
         } catch {
-            Write-Err "Noe gikk galt: $($_.Exception.Message)"
-            Write-Info "($($_.InvocationInfo.ScriptName):$($_.InvocationInfo.ScriptLineNumber))"
+            Write-Err "Noe gikk galt: {0}" $($_.Exception.Message)
+            Write-Info "({0}:{1})" $($_.InvocationInfo.ScriptName) $($_.InvocationInfo.ScriptLineNumber)
             Wait-Key
         }
     }

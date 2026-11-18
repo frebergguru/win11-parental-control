@@ -189,6 +189,30 @@ public static class PcWts {
     $now   = Get-Date
     $today = $now.ToString('yyyy-MM-dd')
 
+    # Meldinger til barnet, på språket foreldrene valgte.
+    $M = @{
+        nb = @{
+            Title   = 'Skjermtid'
+            NoTime  = 'I dag er det ingen skjermtid.'
+            Window  = 'Skjermtid er bare mellom {0} og {1}.'
+            WinEnd  = 'Tillatt tidsrom er slutt for i dag.'
+            Used    = 'Skjermtiden for i dag er brukt opp.'
+            Logoff1 = 'Du blir logget ut om 1 minutt. Lagre det du holder på med.'
+            Left    = 'Du har {0} min igjen av skjermtiden.'
+        }
+        uk = @{
+            Title   = 'Екранний час'
+            NoTime  = 'Сьогодні екранного часу немає.'
+            Window  = 'Екранний час дозволено лише з {0} до {1}.'
+            WinEnd  = 'Дозволений на сьогодні час закінчився.'
+            Used    = 'Екранний час на сьогодні вичерпано.'
+            Logoff1 = 'Через 1 хвилину ви вийдете із системи. Збережіть свою роботу.'
+            Left    = 'Залишилося {0} хв екранного часу.'
+        }
+    }
+    $L = $M['nb']
+    if ($cfg.Language -and $M.ContainsKey([string]$cfg.Language)) { $L = $M[[string]$cfg.Language] }
+
     # Brukstall for i dag
     $usage = @{}
     if (Test-Path -LiteralPath $UsagePath) {
@@ -262,15 +286,15 @@ public static class PcWts {
             $end   = (ConvertTo-PcSpan $rule.End).Add([TimeSpan]::FromMinutes($bonus))
             $tod   = $now.TimeOfDay
             if ($limit -eq 0 -and $bonus -le 0) {
-                $remaining = 0; $reason = 'I dag er det ingen skjermtid.'
+                $remaining = 0; $reason = $L.NoTime
             } elseif ($tod -lt $start -or $tod -ge $end) {
-                $remaining = 0; $reason = "Skjermtid er bare mellom $($rule.Start) og $($rule.End)."
+                $remaining = 0; $reason = $L.Window -f $rule.Start, $rule.End
             } else {
                 $remaining = ($end - $tod).TotalMinutes
-                $reason = 'Tillatt tidsrom er slutt for i dag.'
+                $reason = $L.WinEnd
                 if ($limit -ge 0) {
                     $left = $limit + $bonus - $st.Minutes
-                    if ($left -lt $remaining) { $remaining = $left; $reason = 'Skjermtiden for i dag er brukt opp.' }
+                    if ($left -lt $remaining) { $remaining = $left; $reason = $L.Used }
                 }
             }
         }
@@ -278,11 +302,11 @@ public static class PcWts {
         if ($remaining -le 0) {
             if (-not $st.ExpiredAt) {
                 $st.ExpiredAt = [string]$now.Ticks
-                foreach ($s in $mine) { [PcWts]::Send($s.Id, 'Skjermtid', "$reason`n`nDu blir logget ut om 1 minutt. Lagre det du holder på med.", 55) }
+                foreach ($s in $mine) { [PcWts]::Send($s.Id, $L.Title, "$reason`n`n$($L.Logoff1)", 55) }
                 Write-PcLog "$acct : tiden er ute, varslet"
             } elseif (($now - [datetime]::new([long]$st.ExpiredAt)).TotalSeconds -ge 50) {
                 foreach ($s in $mine) {
-                    [PcWts]::Send($s.Id, 'Skjermtid', $reason, 5)
+                    [PcWts]::Send($s.Id, $L.Title, $reason, 5)
                     [void][PcWts]::WTSLogoffSession([IntPtr]::Zero, $s.Id, $false)
                 }
                 Write-PcLog "$acct : logget ut ($reason)"
@@ -293,7 +317,7 @@ public static class PcWts {
                 foreach ($w in ($warnAt | Sort-Object -Descending)) {
                     if ($remaining -le $w -and $st.Warned -notcontains $w) {
                         $mins = [math]::Max(1, [math]::Ceiling($remaining))
-                        foreach ($s in $active) { [PcWts]::Send($s.Id, 'Skjermtid', "Du har $mins minutt(er) igjen av skjermtiden.", 30) }
+                        foreach ($s in $active) { [PcWts]::Send($s.Id, $L.Title, ($L.Left -f $mins), 30) }
                         $st.Warned = @($st.Warned) + @($warnAt | Where-Object { $_ -ge $remaining })
                         break
                     }
