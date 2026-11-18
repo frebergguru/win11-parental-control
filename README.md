@@ -31,6 +31,22 @@ Skriptet kopierer seg selv til `C:\Program Files\Foreldrekontroll\`. Senere endr
 
 Innstillingene lagres i `C:\Program Files\Foreldrekontroll\config.json`. Barnet kan lese, men ikke endre filene der.
 
+## Spill (Fortnite, Battlefield og andre)
+
+Skriptet er laget for at spill skal virke og ikke bli tregere:
+
+- **Ingen ytelsestap i spill:** AppLocker sjekker bare når et program starter (DLL-regler er ikke slått på, de ville kostet ytelse). Håndheveren kjører med lav prioritet, bruker under ett sekund hvert minutt og kompilerer ingenting etter første kjøring. DNS endres bare når den faktisk er feil, høyst én gang i timen per nettverkskort, så det blir ingen nettverkshikk mens barnet spiller.
+- **Spill, spillklienter og antijuks tillates:** I meny 3 (og i hurtigoppsettet) finner skriptet Steam, Epic (Fortnite), EA app (Battlefield), Battle.net, Ubisoft og antijuks som Easy Anti-Cheat, BattlEye og EA Javelin. Velg **G** for å tillate alle. Hele spillmappen tillates, så oppdateringer og hjelpeprogrammer i spillmappen virker.
+- **Brannmuren rører ikke spilltrafikk:** Bare DNS-portene til kjente offentlige DNS-tjenere og vanlige VPN-porter sperres. UDP 500 og 4500 er åpne, fordi Xbox-nettverket (partychat, Teredo, krysspill) bruker dem. Ping til for eksempel 8.8.8.8 virker fortsatt.
+- **Bare to varsler:** Varselvinduene kan ta fokus fra et spill i fullskjerm, derfor kommer de bare 10 og 3 minutter før tiden er ute.
+
+Gode vaner:
+
+1. Installer nye spill fra **din** konto, og start hvert spill én gang der. Da blir antijuks, DirectX og andre tillegg installert med administratorrettigheter, som barnet ikke har.
+2. Etter at du har installert et nytt spill: kjør meny 3 og velg **G** igjen, så blir det nye spillet tillatt.
+3. Vil et spill ikke starte for barnet, se i **Hendelsesliste > Program- og tjenestelogger > Microsoft > Windows > AppLocker** hva som ble stoppet, og tillat mappen med **M** i meny 3. Hjelper ikke det, prøv å slå av "Sperre kommandolinje" i meny 3.
+4. Discord og andre programmer som installeres i brukerens egen mappe blir sperret. Bruk nettleserversjonen, eller installer en versjon for alle brukere fra din konto.
+
 ## Kjente begrensninger
 
 - **Gjelder hele PC-en:** DNS-filteret, Wi-Fi-filteret og VPN-sperren gjelder også voksne. Trenger du selv VPN, slår du det av i meny 6.

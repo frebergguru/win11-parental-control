@@ -94,6 +94,15 @@ $ChildDeniedTools = @(
     '%WINDIR%\System32\wsl.exe', '%WINDIR%\System32\bash.exe'
 )
 
+# Spillklienter (kjennes igjen på navn eller sti).
+$LauncherPattern = '(?i)steam|epic games|EpicGamesLauncher|\bEA app\b|EA Desktop|EADesktop|Origin|Battle\.net|Ubisoft|uplay|Riot Client|GOG Galaxy|Rockstar Games Launcher'
+# Mapper for antijuks og spilltjenester (Fortnite, Battlefield og andre trenger dem).
+$GameServiceDirs = @(
+    '%ProgramFiles(x86)%\Epic Games\Epic Online Services', '%ProgramFiles(x86)%\EasyAntiCheat_EOS',
+    '%ProgramFiles(x86)%\EasyAntiCheat', '%ProgramFiles(x86)%\Common Files\BattlEye',
+    '%ProgramFiles%\EA\AC', '%ProgramFiles%\Common Files\EAInstaller', '%ProgramFiles(x86)%\Common Files\Steam'
+)
+
 $StorePackages = @('Microsoft.WindowsStore', 'Microsoft.DesktopAppInstaller', 'Microsoft.StorePurchaseApp')
 $XboxPackages  = @('Microsoft.GamingApp', 'Microsoft.XboxApp')
 
@@ -205,7 +214,7 @@ function Get-DefaultConfig {
     return @{
         Version    = 1
         Children   = @()
-        ScreenTime = @{ Enabled = $false; Days = $days; Warn = @(10, 5, 1) }
+        ScreenTime = @{ Enabled = $false; Days = $days; Warn = @(10, 3) }
         Bonus      = @{ Date = ''; Minutes = 0 }
         Apps       = @{
             Enabled = $false; AllowPaths = @(); DenyPaths = @(); DenyPackages = @()
@@ -669,7 +678,8 @@ function Menu-ScreenTime([hashtable]$Cfg, [switch]$Wizard) {
     if ($Wizard) {
         Write-Title 'Skjermtid'
         Write-Info 'Barnet kan bare være pålogget innenfor et tidsrom, og bare så mange minutter per dag.'
-        Write-Info 'Barnet får varsel 10, 5 og 1 minutt før tiden er ute, og blir logget ut etter 1 minutt til.'
+        Write-Info 'Barnet får varsel 10 og 3 minutter før tiden er ute, og blir logget ut 1 minutt etter at tiden er brukt opp.'
+        Write-Info 'Varslene er små vinduer som kan ta fokus fra et spill i fullskjerm, derfor er det bare to.'
         $Cfg.ScreenTime.Enabled = Read-YesNo 'Slå på skjermtid?' $true
         if ($Cfg.ScreenTime.Enabled) {
             Edit-Days $Cfg $Weekdays 'Hverdager (mandag til fredag)'
@@ -757,6 +767,8 @@ function Install-Files {
         $dst = Join-Path $InstallDir $f
         if ((Test-Path -LiteralPath $src) -and ($src -ne $dst)) { Copy-Item -LiteralPath $src -Destination $dst -Force }
     }
+    # Håndheveren kompilerer PcWts.dll på nytt neste gang (i tilfelle koden er endret).
+    Remove-Item -LiteralPath (Join-Path $InstallDir 'PcWts.dll') -Force -ErrorAction SilentlyContinue
     if (-not (Test-Path -LiteralPath (Join-Path $InstallDir 'Haandhever.ps1'))) {
         throw "Fant ikke Haandhever.ps1. Den må ligge i samme mappe som dette skriptet."
     }
@@ -781,6 +793,7 @@ function Register-EnforcerTask {
   <Principals><Principal id="Author"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
   <Settings>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <Priority>7</Priority>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <StartWhenAvailable>true</StartWhenAvailable>
@@ -905,13 +918,15 @@ function Get-AppCandidates([string[]]$WritableDirs) {
             try { $t = $shell.CreateShortcut($lnk.FullName).TargetPath } catch { continue }
             if ($t -and $t -like '*.exe' -and (Test-Path -LiteralPath $t)) {
                 if ($lnk.BaseName -match '(?i)uninstall|avinstaller') { continue }
-                Add-Cand $lnk.BaseName (Split-Path -Parent $t) 'Program'
+                $kind = if ("$($lnk.BaseName) $t" -match $LauncherPattern) { 'Spillklient' } else { 'Program' }
+                Add-Cand $lnk.BaseName (Split-Path -Parent $t) $kind
             }
         }
     }
-    # Steam
+    # Steam (selve klienten trengs for å starte Steam-spill)
     $steam = Get-PcReg 'HKLM:\SOFTWARE\WOW6432Node\Valve\Steam' 'InstallPath'
     if ($steam -and (Test-Path -LiteralPath $steam)) {
+        Add-Cand 'Steam (klient og alle Steam-spill)' $steam 'Spillklient'
         $libs = @($steam)
         $vdf = Join-Path $steam 'steamapps\libraryfolders.vdf'
         if (Test-Path -LiteralPath $vdf) {
@@ -931,7 +946,24 @@ function Get-AppCandidates([string[]]$WritableDirs) {
             try { $j = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json; Add-Cand "Epic: $($j.DisplayName)" $j.InstallLocation 'Spill' } catch { }
         }
     }
-    $list = @($found.Values | Sort-Object Kind, Name)
+    # EA-spill (Battlefield og andre) som er registrert i registeret
+    foreach ($root in @('HKLM:\SOFTWARE\WOW6432Node\EA Games', 'HKLM:\SOFTWARE\EA Games', 'HKLM:\SOFTWARE\WOW6432Node\Electronic Arts', 'HKLM:\SOFTWARE\Electronic Arts')) {
+        foreach ($k in @(Get-ChildItem -Path $root -ErrorAction SilentlyContinue)) {
+            $dir = Get-PcReg $k.PSPath 'Install Dir'
+            if (-not $dir) { $dir = Get-PcReg $k.PSPath 'InstallLocation' }
+            if ($dir) {
+                $kind = if ($k.PSChildName -match $LauncherPattern) { 'Spillklient' } else { 'Spill' }
+                Add-Cand "EA: $($k.PSChildName)" $dir $kind
+            }
+        }
+    }
+    # Antijuks og spilltjenester som spillene starter i barnets økt
+    foreach ($d in $GameServiceDirs) {
+        $full = [Environment]::ExpandEnvironmentVariables($d)
+        Add-Cand "Spilltjeneste: $(Split-Path -Leaf $full)" $full 'Spilltjeneste'
+    }
+    $order = @{ Spill = 0; Spillklient = 1; Spilltjeneste = 2; Program = 3 }
+    $list = @($found.Values | Sort-Object @{ Expression = { $order[$_.Kind] } }, Name)
     foreach ($c in $list) {
         $protected = (Test-UnderAny $c.Dir @($env:ProgramFiles, ${env:ProgramFiles(x86)})) -and -not (Test-UnderAny $c.Dir $WritableDirs)
         $c | Add-Member -NotePropertyName Protected -NotePropertyValue $protected
@@ -969,20 +1001,28 @@ function Menu-Apps([hashtable]$Cfg, [switch]$Wizard) {
         if (-not $Cfg.Apps.Enabled) { Save-Config $Cfg; Apply-Apps $Cfg; return }
         $Cfg.Apps.BlockStore = Read-YesNo 'Sperre Microsoft Store og App Installer (winget) for barnet?' $true
         $Cfg.Apps.BlockXbox = Read-YesNo 'Sperre Xbox-appen (den kan installere spill uten passord)?' $true
-        $Cfg.Apps.BlockTools = Read-YesNo 'Sperre kommandolinje, PowerShell og andre verktøy som kan omgå sperrene?' $true
+        $Cfg.Apps.BlockTools = Read-YesNo 'Sperre kommandolinje, PowerShell og andre verktøy som kan omgå sperrene? (Slå av hvis et spill ikke vil starte.)' $true
         $Cfg.Apps.StrictUac = Read-YesNo 'Avvise "Kjør som administrator" i barnets økt automatisk (anbefalt)?' $true
     }
     Write-Info 'Leter etter installerte programmer og spill (kan ta litt tid) ...'
     $writable = Get-WritableDirs $Cfg
     $cands = Get-AppCandidates $writable
     $store = Get-StoreApps
+    $games = @($cands | Where-Object { $_.Kind -ne 'Program' })
+    if ($Wizard -and $games.Count) {
+        Write-Host ''
+        Write-Info "Fant $($games.Count) spill, spillklienter og antijuks-tjenester (for eksempel Steam, Epic/Fortnite, EA/Battlefield)."
+        if (Read-YesNo 'Tillate alle sammen, så spillene starter og oppdateres som vanlig?' $true) { Enable-AllGames $Cfg $cands }
+    }
     while ($true) {
         Write-Title 'Apper og spill: velg hva barnet får bruke'
         $rows = @()
+        $kindTxt = @{ Spill = 'Spill'; Spillklient = 'Spillklient'; Spilltjeneste = 'Antijuks/tjeneste'; Program = 'Program' }
         foreach ($c in $cands) {
             if ($c.Protected) { $ok = -not (Test-UnderAny $c.Dir @($Cfg.Apps.DenyPaths)) }
             else { $ok = Test-UnderAny $c.Dir @($Cfg.Apps.AllowPaths) }
-            $rows += [pscustomobject]@{ Type = 'dir'; Item = $c; Ok = $ok; Label = $c.Name; Note = $(if ($c.Protected) { '' } else { '(mappe barnet kan skrive i)' }) }
+            $label = "[$($kindTxt[$c.Kind])] $($c.Name)"
+            $rows += [pscustomobject]@{ Type = 'dir'; Item = $c; Ok = $ok; Label = $label; Note = $(if ($c.Protected) { '' } else { '(mappe barnet kan skrive i)' }) }
         }
         foreach ($s in $store) {
             $ok = -not (@($Cfg.Apps.DenyPackages | Where-Object { $_.Name -eq $s.Name }).Count)
@@ -999,9 +1039,11 @@ function Menu-Apps([hashtable]$Cfg, [switch]$Wizard) {
         Write-Host ''
         Write-Info "Store: $(if ($Cfg.Apps.BlockStore) {'sperret'} else {'tillatt'}),  Xbox-appen: $(if ($Cfg.Apps.BlockXbox) {'sperret'} else {'tillatt'})"
         Write-Host '  Skriv numre for å bytte mellom tillatt/sperret (for eksempel 2,5,7-9).'
+        Write-Host '  G = tillat alle spill, spillklienter og antijuks (anbefalt så spillene virker som de skal)'
         Write-Host '  S = bytt Store,  X = bytt Xbox-appen,  M = legg til mappe selv,  Enter = ferdig'
         $a = (Read-Host 'Valg').Trim()
         if ($a -eq '') { break }
+        if ($a -ieq 'g') { Enable-AllGames $Cfg $cands; continue }
         if ($a -ieq 's') { $Cfg.Apps.BlockStore = -not $Cfg.Apps.BlockStore; continue }
         if ($a -ieq 'x') { $Cfg.Apps.BlockXbox = -not $Cfg.Apps.BlockXbox; continue }
         if ($a -ieq 'm') {
@@ -1023,8 +1065,10 @@ function Menu-Apps([hashtable]$Cfg, [switch]$Wizard) {
                 if ($r.Ok) { $Cfg.Apps.DenyPackages = @($Cfg.Apps.DenyPackages) + @(@{ Name = $r.Item.Name; Publisher = $r.Item.Publisher }) }
                 else { $Cfg.Apps.DenyPackages = @($Cfg.Apps.DenyPackages | Where-Object { $_.Name -ne $r.Item.Name }) }
             } elseif ($r.Item.Protected) {
-                if ($r.Ok) { $Cfg.Apps.DenyPaths = @($Cfg.Apps.DenyPaths) + @($r.Item.Dir) }
-                else { $Cfg.Apps.DenyPaths = @($Cfg.Apps.DenyPaths | Where-Object { $_ -ne $r.Item.Dir }) }
+                if ($r.Ok) {
+                    $Cfg.Apps.DenyPaths = @($Cfg.Apps.DenyPaths) + @($r.Item.Dir)
+                    $Cfg.Apps.AllowPaths = @($Cfg.Apps.AllowPaths | Where-Object { $_ -ne $r.Item.Dir })
+                } else { $Cfg.Apps.DenyPaths = @($Cfg.Apps.DenyPaths | Where-Object { $_ -ne $r.Item.Dir }) }
             } else {
                 if ($r.Ok) { $Cfg.Apps.AllowPaths = @($Cfg.Apps.AllowPaths | Where-Object { $_ -ne $r.Item.Dir }) }
                 else {
@@ -1036,6 +1080,22 @@ function Menu-Apps([hashtable]$Cfg, [switch]$Wizard) {
     }
     Save-Config $Cfg
     Apply-Apps $Cfg $writable
+}
+
+function Enable-AllGames([hashtable]$Cfg, $Cands) {
+    # Hele spillmappen tillates for barnet, også undermapper som barnet kan skrive i
+    # (spill og antijuks legger ofte hjelpeprogrammer der). Det er prisen for at spillene virker.
+    $games = @($Cands | Where-Object { $_.Kind -ne 'Program' })
+    foreach ($g in $games) {
+        $Cfg.Apps.DenyPaths = @($Cfg.Apps.DenyPaths | Where-Object { $_ -ne $g.Dir })
+        if (@($Cfg.Apps.AllowPaths) -notcontains $g.Dir) { $Cfg.Apps.AllowPaths = @($Cfg.Apps.AllowPaths) + @($g.Dir) }
+    }
+    $open = @($games | Where-Object { -not $_.Protected })
+    Write-Ok "$($games.Count) spill og spillklienter er tillatt."
+    if ($open.Count) {
+        Write-Warn "$($open.Count) av dem ligger i mapper barnet kan skrive i (typisk Steam). Barnet kan i teorien legge"
+        Write-Warn 'egne programmer der. Vil du stenge det, sperr dem igjen med nummeret i listen.'
+    }
 }
 
 function New-AppLockerXml([hashtable]$Cfg, [string[]]$ChildSids, [string[]]$OtherSids, [string[]]$WritableDirs) {
@@ -1391,7 +1451,10 @@ function Apply-Web([hashtable]$Cfg, [switch]$Remove) {
         $p = $DnsProviders[$Cfg.Web.Provider]
         $Cfg.Web.Servers = @($p.V4) + @($p.V6)
         foreach ($nic in $nics) {
-            try { Set-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -ServerAddresses $Cfg.Web.Servers } catch { Write-Warn "DNS på '$($nic.Name)': $($_.Exception.Message)" }
+            $v6 = $false
+            try { $v6 = [bool](Get-NetAdapterBinding -Name $nic.Name -ComponentID ms_tcpip6 -ErrorAction Stop).Enabled } catch { }
+            $list = @($Cfg.Web.Servers | Where-Object { $v6 -or $_ -notlike '*:*' })
+            try { Set-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -ServerAddresses $list } catch { Write-Warn "DNS på '$($nic.Name)': $($_.Exception.Message)" }
         }
         if (Get-Command Add-DnsClientDohServerAddress -ErrorAction SilentlyContinue) {
             foreach ($ip in $Cfg.Web.Servers) {
@@ -1404,8 +1467,12 @@ function Apply-Web([hashtable]$Cfg, [switch]$Remove) {
             }
         }
         if ($Cfg.Web.BlockPublicDns) {
-            New-NetFirewallRule -Name 'FK-DNS-ut' -DisplayName 'Foreldrekontroll: sperr andre DNS-tjenere' -Group $FwGroup `
-                -Direction Outbound -Action Block -RemoteAddress $PublicDns -Profile Any | Out-Null
+            # Bare DNS-portene (53, DoH 443, DoT/DoQ 853). Ping og annen trafikk til disse adressene går
+            # fortsatt, siden noen spill og klienter bruker for eksempel 8.8.8.8 til å sjekke nettforbindelsen.
+            New-NetFirewallRule -Name 'FK-DNS-tcp' -DisplayName 'Foreldrekontroll: sperr andre DNS-tjenere (TCP)' -Group $FwGroup `
+                -Direction Outbound -Action Block -Protocol TCP -RemotePort @('53', '443', '853') -RemoteAddress $PublicDns -Profile Any | Out-Null
+            New-NetFirewallRule -Name 'FK-DNS-udp' -DisplayName 'Foreldrekontroll: sperr andre DNS-tjenere (UDP)' -Group $FwGroup `
+                -Direction Outbound -Action Block -Protocol UDP -RemotePort @('53', '443', '853') -RemoteAddress $PublicDns -Profile Any | Out-Null
         }
         Clear-DnsClientCache
         Write-Ok "Nettfilter: $($p.Name) ($(@($p.V4) -join ', '))"
@@ -1428,7 +1495,7 @@ function Menu-Vpn([hashtable]$Cfg) {
     $Cfg.Vpn.Enabled = Read-YesNo 'Sperre VPN og proxy?' $true
     if ($Cfg.Vpn.Enabled) {
         $Cfg.Vpn.DisableBuiltin = Read-YesNo 'Slå av Windows sin innebygde VPN (tjenestene RasMan og SstpSvc)?' $true
-        $Cfg.Vpn.BlockPorts = Read-YesNo 'Sperre VPN-porter i brannmuren (PPTP, L2TP, IKEv2, OpenVPN, WireGuard)?' $true
+        $Cfg.Vpn.BlockPorts = Read-YesNo 'Sperre VPN-porter i brannmuren (PPTP, L2TP, OpenVPN, WireGuard; ikke portene Xbox-spill trenger)?' $true
         $Cfg.Vpn.HideSettings = Read-YesNo 'Skjule VPN-, proxy- og mobilsone-sidene i Innstillinger for barnet?' $true
     }
     Save-Config $Cfg
@@ -1444,7 +1511,9 @@ function Apply-Vpn([hashtable]$Cfg, [switch]$Remove) {
         if ($Cfg.Vpn.BlockPorts) {
             $rules = @(
                 @{ N = 'FK-VPN-pptp';      D = 'PPTP';             P = 'TCP'; Port = '1723' }
-                @{ N = 'FK-VPN-udp';       D = 'L2TP/IKEv2/OpenVPN/WireGuard (UDP)'; P = 'UDP'; Port = @('500', '1701', '4500', '1194', '51820') }
+                # UDP 500 og 4500 (IKEv2) sperres IKKE: Xbox-nettverket (partychat, Teredo, krysspill) bruker dem.
+                # Windows sin egen IKEv2-VPN er uansett av når RasMan er slått av.
+                @{ N = 'FK-VPN-udp';       D = 'L2TP/OpenVPN/WireGuard (UDP)'; P = 'UDP'; Port = @('1701', '1194', '51820') }
                 @{ N = 'FK-VPN-openvpn';   D = 'OpenVPN (TCP)';    P = 'TCP'; Port = '1194' }
             )
             foreach ($r in $rules) {

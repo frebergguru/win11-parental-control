@@ -18,6 +18,7 @@ $ConfigPath = Join-Path $Base 'config.json'
 $UsagePath  = Join-Path $Base 'usage.json'
 $LogPath    = Join-Path $Base 'haandhever.log'
 $WifiStatePath = Join-Path $Base 'wifi-sperret.json'
+$DnsStatePath  = Join-Path $Base 'dns-reparert.json'
 
 function Write-PcLog([string]$Text) {
     try {
@@ -34,6 +35,9 @@ function ConvertTo-PcSpan([string]$Text) {
     return New-Object TimeSpan ([int]$p[0]), ([int]$p[1]), 0
 }
 
+# Lav prioritet, så spill og andre programmer aldri merker håndheveren.
+try { [Diagnostics.Process]::GetCurrentProcess().PriorityClass = [Diagnostics.ProcessPriorityClass]::BelowNormal } catch { }
+
 # Bare én kjøring om gangen (minutt-trigger og påloggings-trigger kan treffe samtidig).
 $mutex = New-Object System.Threading.Mutex($false, 'Global\ForeldrekontrollHaandhever')
 try { if (-not $mutex.WaitOne(30000)) { exit 0 } } catch [System.Threading.AbandonedMutexException] { }
@@ -43,25 +47,48 @@ try {
     $cfg = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
 
     # ------------------------------------------------------------------ DNS
+    # Sammenligner per adressefamilie med normaliserte adresser, og endrer bare når noe faktisk
+    # er annerledes. Å sette DNS tømmer DNS-hurtigbufferen og skal ikke skje hvert minutt.
+    function ConvertTo-PcIp([string]$a) { try { return ([System.Net.IPAddress]::Parse($a)).ToString() } catch { return $a } }
     if ($cfg.Web -and $cfg.Web.Enabled -and $cfg.Web.Servers) {
-        $want = @($cfg.Web.Servers)
-        foreach ($nic in @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue)) {
-            try {
-                $have = @(Get-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -ErrorAction Stop |
-                          ForEach-Object { $_.ServerAddresses }) | Where-Object { $_ }
-                $diff = Compare-Object -ReferenceObject $want -DifferenceObject @($have)
-                if ($diff) {
-                    Set-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -ServerAddresses $want -ErrorAction Stop
-                    Write-PcLog "DNS satt tilbake på '$($nic.Name)'"
-                }
-            } catch { }
+        $wantAll = @($cfg.Web.Servers | ForEach-Object { ConvertTo-PcIp $_ })
+        $dnsState = @{}
+        if (Test-Path -LiteralPath $DnsStatePath) {
+            try { (Get-Content -LiteralPath $DnsStatePath -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $dnsState[$_.Name] = [long]$_.Value } } catch { }
         }
+        $changed = $false
+        foreach ($nic in @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue)) {
+            $key = [string]$nic.ifIndex
+            # Samme kort høyst én gang i timen, så en innstilling som ikke "fester seg" aldri gir gjentatte nettverkshikk.
+            if ($dnsState.ContainsKey($key) -and ((Get-Date) - [datetime]::new($dnsState[$key])).TotalMinutes -lt 60) { continue }
+            $v6Bound = $false
+            try { $v6Bound = [bool](Get-NetAdapterBinding -Name $nic.Name -ComponentID ms_tcpip6 -ErrorAction Stop).Enabled } catch { }
+            $wrong = $false
+            foreach ($entry in @(Get-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -ErrorAction SilentlyContinue)) {
+                $isV6 = ($entry.AddressFamily -eq 23)
+                if ($isV6 -and -not $v6Bound) { continue }
+                $want = @($wantAll | Where-Object { ($_ -like '*:*') -eq $isV6 })
+                if ($want.Count -eq 0) { continue }
+                $have = @($entry.ServerAddresses | Where-Object { $_ } | ForEach-Object { ConvertTo-PcIp $_ })
+                if (Compare-Object -ReferenceObject $want -DifferenceObject @($have) -SyncWindow 0) { $wrong = $true }
+            }
+            if ($wrong) {
+                try {
+                    $list = @($wantAll | Where-Object { $v6Bound -or $_ -notlike '*:*' })
+                    Set-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -ServerAddresses $list -ErrorAction Stop
+                    Write-PcLog "DNS satt tilbake på '$($nic.Name)'"
+                } catch { Write-PcLog "DNS på '$($nic.Name)' feilet: $($_.Exception.Message)" }
+                $dnsState[$key] = (Get-Date).Ticks; $changed = $true
+            }
+        }
+        if ($changed) { $dnsState | ConvertTo-Json | Set-Content -LiteralPath $DnsStatePath -Encoding UTF8 }
     }
 
     # ------------------------------------- Alltid sperrede Wi-Fi-navn (Anlegg1, Anlegg2, ...)
     # Skriptet sperrer navn + 1 til PrefixMax på forhånd. Her sperres høyere tall som dukker opp.
     $prefixes = @($cfg.Wifi.BlockPrefixes | Where-Object { $_ })
-    if ($cfg.Wifi -and $cfg.Wifi.Mode -ne 'allow' -and $prefixes.Count -gt 0) {
+    # Hvert femte minutt holder (leser bare listen Windows allerede har, starter ikke et nytt søk).
+    if ($cfg.Wifi -and $cfg.Wifi.Mode -ne 'allow' -and $prefixes.Count -gt 0 -and ((Get-Date).Minute % 5 -eq 0)) {
         try {
             $netsh = "$env:windir\System32\netsh.exe"
             $known = @($cfg.Wifi.AppliedPrefixSsids) + @($cfg.Wifi.Ssids)
@@ -92,8 +119,14 @@ try {
     $children = @($cfg.Children)
     if ($children.Count -eq 0) { exit 0 }
 
+    # C#-koden kompileres bare én gang til PcWts.dll; senere kjøringer laster bare filen
+    # (å kompilere hvert minutt ville gitt et lite CPU-hopp hvert minutt).
+    $dll = Join-Path $Base 'PcWts.dll'
+    if (-not ('PcWts' -as [type]) -and (Test-Path -LiteralPath $dll)) {
+        try { Add-Type -LiteralPath $dll } catch { Remove-Item -LiteralPath $dll -Force -ErrorAction SilentlyContinue }
+    }
     if (-not ('PcWts' -as [type])) {
-        Add-Type -TypeDefinition @'
+        $src = @'
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -133,6 +166,10 @@ public static class PcWts {
     }
 }
 '@
+        try { Add-Type -TypeDefinition $src -OutputAssembly $dll -OutputType Library } catch { }
+        if (-not ('PcWts' -as [type])) {
+            if (Test-Path -LiteralPath $dll) { Add-Type -LiteralPath $dll } else { Add-Type -TypeDefinition $src }
+        }
     }
 
     $now   = Get-Date
@@ -160,7 +197,7 @@ public static class PcWts {
     if ($cfg.Bonus -and $cfg.Bonus.Date -eq $today) { $bonus = [int]$cfg.Bonus.Minutes }
 
     $rule = $cfg.ScreenTime.Days.($now.DayOfWeek.ToString())
-    $warnAt = @(10, 5, 1)
+    $warnAt = @(10, 3)
     if ($cfg.ScreenTime.Warn) { $warnAt = @($cfg.ScreenTime.Warn | ForEach-Object { [int]$_ }) }
 
     $locked = @{}
