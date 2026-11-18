@@ -43,8 +43,19 @@ try { [Diagnostics.Process]::GetCurrentProcess().PriorityClass = [Diagnostics.Pr
 # holde den og dermed stoppe håndheveren.)
 
 try {
-    if (-not (Test-Path -LiteralPath $ConfigPath)) { exit 0 }
-    $cfg = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    # Les konfigurasjonen uten å låse den (oppsettet bytter den ut atomisk). Er config.json borte eller
+    # skadet midt i en lagring, brukes .tmp eller .bak.
+    $cfg = $null
+    foreach ($f in @($ConfigPath, "$ConfigPath.tmp", "$ConfigPath.bak")) {
+        if (-not (Test-Path -LiteralPath $f)) { continue }
+        try {
+            $fs = New-Object IO.FileStream($f, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+            try { $text = (New-Object IO.StreamReader($fs, [Text.Encoding]::UTF8, $true)).ReadToEnd() } finally { $fs.Dispose() }
+            $c = $text | ConvertFrom-Json
+            if ($c -and $c.Version) { $cfg = $c; break }
+        } catch { }
+    }
+    if (-not $cfg) { exit 0 }
 
     # ------------------------------------------------------------------ DNS
     # Sammenligner per adressefamilie med normaliserte adresser, og endrer bare når noe faktisk
@@ -92,7 +103,8 @@ try {
     if ($cfg.Wifi -and $cfg.Wifi.Mode -ne 'allow' -and $prefixes.Count -gt 0 -and ((Get-Date).Minute % 5 -eq 0)) {
         try {
             $netsh = "$env:windir\System32\netsh.exe"
-            $known = @($cfg.Wifi.AppliedPrefixSsids) + @($cfg.Wifi.Ssids)
+            # Pakk ut nestede lister (eldre versjoner kunne lagre hele navnelisten som ett element).
+            $known = @(@($cfg.Wifi.AppliedPrefixSsids) + @($cfg.Wifi.Ssids) | ForEach-Object { $_ } | ForEach-Object { $_ } | Where-Object { $_ })
             $state = @()
             # ForEach-Object pakker ut lista (ConvertFrom-Json i PowerShell 5.1 gir hele lista som ett objekt).
             if (Test-Path -LiteralPath $WifiStatePath) { $state = @(Get-Content -LiteralPath $WifiStatePath -Raw -Encoding UTF8 | ConvertFrom-Json | ForEach-Object { $_ }) }
@@ -122,66 +134,72 @@ try {
     $children = @($cfg.Children)
     if ($children.Count -eq 0) { exit 0 }
 
-    # C#-koden kompileres bare én gang til PcWts3.dll; senere kjøringer laster bare filen
-    # (å kompilere hvert minutt ville gitt et lite CPU-hopp hvert minutt).
-    $dll = Join-Path $Base 'PcWts3.dll'
-    if (-not ('PcWts' -as [type]) -and (Test-Path -LiteralPath $dll)) {
-        try { Add-Type -LiteralPath $dll } catch { Remove-Item -LiteralPath $dll -Force -ErrorAction SilentlyContinue }
-    }
-    if (-not ('PcWts' -as [type])) {
-        $src = @'
+    # C#-koden kompileres bare én gang; filnavnet inneholder en kontrollsum av koden, så en ny
+    # versjon av håndheveren aldri bruker en gammel, kompilert fil (å kompilere hvert minutt ville
+    # gitt et lite CPU-hopp hvert minutt).
+    $src = @'
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 public static class PcWts {
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    struct WTS_SESSION_INFO { public int SessionId; public string Station; public int State; }
-    [DllImport("wtsapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    static extern bool WTSEnumerateSessionsW(IntPtr h, int reserved, int version, out IntPtr info, out int count);
-    [DllImport("wtsapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    static extern bool WTSQuerySessionInformationW(IntPtr h, int id, int cls, out IntPtr buf, out int bytes);
-    [DllImport("wtsapi32.dll")]
-    static extern void WTSFreeMemory(IntPtr p);
-    [DllImport("wtsapi32.dll", SetLastError = true)]
-    public static extern bool WTSLogoffSession(IntPtr h, int id, bool wait);
-    [DllImport("wtsapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    static extern bool WTSSendMessageW(IntPtr h, int id, string title, int titleLen, string msg, int msgLen,
-                                       int style, int timeout, out int resp, bool wait);
-    static string Query(int id, int cls) {
-        IntPtr b; int n;
-        if (!WTSQuerySessionInformationW(IntPtr.Zero, id, cls, out b, out n)) return "";
-        string r = Marshal.PtrToStringUni(b); WTSFreeMemory(b); return r;
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+struct WTS_SESSION_INFO { public int SessionId; public string Station; public int State; }
+[DllImport("wtsapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+static extern bool WTSEnumerateSessionsW(IntPtr h, int reserved, int version, out IntPtr info, out int count);
+[DllImport("wtsapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+static extern bool WTSQuerySessionInformationW(IntPtr h, int id, int cls, out IntPtr buf, out int bytes);
+[DllImport("wtsapi32.dll")]
+static extern void WTSFreeMemory(IntPtr p);
+[DllImport("wtsapi32.dll", SetLastError = true)]
+public static extern bool WTSLogoffSession(IntPtr h, int id, bool wait);
+[DllImport("wtsapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+static extern bool WTSSendMessageW(IntPtr h, int id, string title, int titleLen, string msg, int msgLen,
+                                   int style, int timeout, out int resp, bool wait);
+static string Query(int id, int cls) {
+    IntPtr b; int n;
+    if (!WTSQuerySessionInformationW(IntPtr.Zero, id, cls, out b, out n)) return "";
+    string r = Marshal.PtrToStringUni(b); WTSFreeMemory(b); return r;
+}
+// "id<TAB>domene<TAB>bruker<TAB>tilstand" for hver økt med en bruker. Tilstand 0 = aktiv.
+public static string[] Sessions() {
+    var res = new List<string>(); IntPtr p; int n;
+    if (!WTSEnumerateSessionsW(IntPtr.Zero, 0, 1, out p, out n)) return res.ToArray();
+    int size = Marshal.SizeOf(typeof(WTS_SESSION_INFO));
+    for (int i = 0; i < n; i++) {
+        var s = (WTS_SESSION_INFO)Marshal.PtrToStructure(new IntPtr(p.ToInt64() + (long)i * size), typeof(WTS_SESSION_INFO));
+        string user = Query(s.SessionId, 5);
+        if (user.Length > 0) res.Add(s.SessionId + "\t" + Query(s.SessionId, 7) + "\t" + user + "\t" + s.State);
     }
-    // "id<TAB>domene<TAB>bruker<TAB>tilstand" for hver økt med en bruker. Tilstand 0 = aktiv.
-    public static string[] Sessions() {
-        var res = new List<string>(); IntPtr p; int n;
-        if (!WTSEnumerateSessionsW(IntPtr.Zero, 0, 1, out p, out n)) return res.ToArray();
-        int size = Marshal.SizeOf(typeof(WTS_SESSION_INFO));
-        for (int i = 0; i < n; i++) {
-            var s = (WTS_SESSION_INFO)Marshal.PtrToStructure(new IntPtr(p.ToInt64() + (long)i * size), typeof(WTS_SESSION_INFO));
-            string user = Query(s.SessionId, 5);
-            if (user.Length > 0) res.Add(s.SessionId + "\t" + Query(s.SessionId, 7) + "\t" + user + "\t" + s.State);
-        }
-        WTSFreeMemory(p); return res.ToArray();
-    }
-    // 1 = låst, 0 = ulåst, -1 = ukjent. WTSINFOEXW: Level (byte 0), så unionen på byte 8 (den
-    // inneholder LARGE_INTEGER og er derfor 8-justert): SessionId 8, SessionState 12, SessionFlags 16.
-    public static int Locked(int id) {
-        IntPtr b; int n;
-        if (!WTSQuerySessionInformationW(IntPtr.Zero, id, 25, out b, out n)) return -1;
-        try {
-            if (n < 20 || Marshal.ReadInt32(b, 0) != 1) return -1;
-            int flags = Marshal.ReadInt32(b, 16);
-            if (flags == 0) return 1;
-            if (flags == 1) return 0;
-            return -1;
-        } finally { WTSFreeMemory(b); }
-    }
-    public static void Send(int id, string title, string msg, int timeoutSec) {
-        int r; WTSSendMessageW(IntPtr.Zero, id, title, title.Length * 2, msg, msg.Length * 2, 0x40, timeoutSec, out r, false);
-    }
+    WTSFreeMemory(p); return res.ToArray();
+}
+// 1 = låst, 0 = ulåst, -1 = ukjent. WTSINFOEXW: Level (byte 0), så unionen på byte 8 (den
+// inneholder LARGE_INTEGER og er derfor 8-justert): SessionId 8, SessionState 12, SessionFlags 16.
+public static int Locked(int id) {
+    IntPtr b; int n;
+    if (!WTSQuerySessionInformationW(IntPtr.Zero, id, 25, out b, out n)) return -1;
+    try {
+        if (n < 20 || Marshal.ReadInt32(b, 0) != 1) return -1;
+        int flags = Marshal.ReadInt32(b, 16);
+        if (flags == 0) return 1;
+        if (flags == 1) return 0;
+        return -1;
+    } finally { WTSFreeMemory(b); }
+}
+public static void Send(int id, string title, string msg, int timeoutSec) {
+    int r; WTSSendMessageW(IntPtr.Zero, id, title, title.Length * 2, msg, msg.Length * 2, 0x40, timeoutSec, out r, false);
+}
 }
 '@
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $hash = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($src)))).Replace('-', '').Substring(0, 12)
+    $dll = Join-Path $Base "PcWts-$hash.dll"
+    foreach ($old in @(Get-ChildItem -LiteralPath $Base -Filter 'PcWts*.dll' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $dll })) {
+        Remove-Item -LiteralPath $old.FullName -Force -ErrorAction SilentlyContinue
+    }
+    if (-not ('PcWts' -as [type]) -and (Test-Path -LiteralPath $dll)) {
+        try { Add-Type -LiteralPath $dll } catch { Remove-Item -LiteralPath $dll -Force -ErrorAction SilentlyContinue }
+    }
+    if (-not ('PcWts' -as [type])) {
         try { Add-Type -TypeDefinition $src -OutputAssembly $dll -OutputType Library } catch { }
         if (-not ('PcWts' -as [type])) {
             if (Test-Path -LiteralPath $dll) { Add-Type -LiteralPath $dll } else { Add-Type -TypeDefinition $src }

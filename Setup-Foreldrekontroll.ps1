@@ -186,7 +186,7 @@ function Write-Title([string]$Text) {
     Write-Host ('=' * 70) -ForegroundColor DarkCyan
 }
 function Write-Ok([string]$Text)   { Write-Host ('  [OK] ' + (T $Text @args)) -ForegroundColor Green }
-function Write-Warn([string]$Text) { Write-Host ('  [!]  ' + (T $Text @args)) -ForegroundColor Yellow }
+function Write-Warn([string]$Text) { $script:WarnCount++; Write-Host ('  [!]  ' + (T $Text @args)) -ForegroundColor Yellow }
 function Write-Err([string]$Text)  { Write-Host ('  [X]  ' + (T $Text @args)) -ForegroundColor Red }
 function Write-Info([string]$Text) { Write-Host ('       ' + (T $Text @args)) -ForegroundColor Gray }
 
@@ -322,13 +322,19 @@ function Get-Config {
     # Returnerer $null hvis konfigurasjonen finnes, men verken den eller sikkerhetskopien kan leses.
     # Da må vi aldri fortsette med standardverdier: de ville skrevet over alle sikkerhetskopiene.
     $cfg = Get-DefaultConfig
-    if (-not (Test-Path -LiteralPath $ConfigPath)) { return $cfg }
-    foreach ($f in @($ConfigPath, "$ConfigPath.bak")) {
-        if (-not (Test-Path -LiteralPath $f)) { continue }
+    # config.json kan mangle hvis en lagring ble avbrutt midt i byttet; da ligger dataene i .tmp
+    # (nyest) eller .bak. Standardverdier brukes bare når ingen av de tre filene finnes.
+    $files = @($ConfigPath, "$ConfigPath.tmp", "$ConfigPath.bak") | Where-Object { Test-Path -LiteralPath $_ }
+    if (@($files).Count -eq 0) { return $cfg }
+    foreach ($f in $files) {
         try {
-            $loaded = ConvertTo-PcHashtable (Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json)
+            $loaded = ConvertTo-PcHashtable (Read-SharedText $f | ConvertFrom-Json)
             if ($loaded -isnot [hashtable] -or -not $loaded.ContainsKey('Version')) { throw (T 'ugyldig innhold') }
-            if ($f -ne $ConfigPath) { Write-Warn 'Konfigurasjonen var skadet. Sikkerhetskopien ({0}) brukes.' $f }
+            if ($f -ne $ConfigPath) {
+                Write-Warn 'Konfigurasjonen var skadet. Sikkerhetskopien ({0}) brukes.' $f
+                # Legg den gode kopien tilbake som config.json med en gang, uten å røre .bak.
+                try { Copy-Item -LiteralPath $f -Destination $ConfigPath -Force } catch { }
+            }
             return (Merge-PcDefaults $cfg $loaded)
         } catch {
             Write-Warn "Kunne ikke lese {0} ({1})." $f $($_.Exception.Message)
@@ -342,10 +348,26 @@ function Save-Config([hashtable]$Cfg) {
     # Forrige versjon blir liggende som config.json.bak.
     if (-not (Test-Path -LiteralPath $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null }
     $tmp = "$ConfigPath.tmp"
-    $json = $Cfg | ConvertTo-Json -Depth 10
-    [IO.File]::WriteAllText($tmp, $json, (New-Object Text.UTF8Encoding $true))
-    if (Test-Path -LiteralPath $ConfigPath) { [IO.File]::Replace($tmp, $ConfigPath, "$ConfigPath.bak") }
-    else { [IO.File]::Move($tmp, $ConfigPath) }
+    $bytes = (New-Object Text.UTF8Encoding $true).GetPreamble() + [Text.Encoding]::UTF8.GetBytes(($Cfg | ConvertTo-Json -Depth 10))
+    $fs = New-Object IO.FileStream($tmp, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None, 4096, [IO.FileOptions]::WriteThrough)
+    try { $fs.Write($bytes, 0, $bytes.Length); $fs.Flush($true) } finally { $fs.Dispose() }
+    # Håndheveren leser filen hvert minutt; prøv noen ganger hvis den akkurat er åpen.
+    for ($i = 1; $i -le 5; $i++) {
+        try {
+            if (Test-Path -LiteralPath $ConfigPath) { [IO.File]::Replace($tmp, $ConfigPath, "$ConfigPath.bak") }
+            else { [IO.File]::Move($tmp, $ConfigPath) }
+            return
+        } catch [IO.IOException] {
+            if ($i -eq 5) { throw }
+            Start-Sleep -Milliseconds 400
+        }
+    }
+}
+
+function Read-SharedText([string]$Path) {
+    # Leser en fil uten å hindre at den byttes ut eller slettes samtidig.
+    $fs = New-Object IO.FileStream($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    try { return (New-Object IO.StreamReader($fs, [Text.Encoding]::UTF8, $true)).ReadToEnd() } finally { $fs.Dispose() }
 }
 
 function Lock-Settings {
@@ -452,8 +474,10 @@ function Invoke-Native([string]$Exe, [string]$Arguments) {
 
 function Get-StableGuid([string]$Text) {
     # Samme tekst gir alltid samme GUID, så en uendret AppLocker-policy blir byte for byte lik.
-    $md5 = [Security.Cryptography.MD5]::Create()
-    return (New-Object Guid (, $md5.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text)))).ToString()
+    # SHA256 (ikke MD5, som er sperret på PC-er med FIPS-modus), de første 16 bytene.
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $h = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))
+    return (New-Object Guid (, [byte[]]$h[0..15])).ToString()
 }
 
 function Set-PcFirewallRule([string]$Name, [string]$Display, [hashtable]$Params) {
@@ -972,11 +996,7 @@ function Install-Files {
         $dst = Join-Path $InstallDir $f
         if ((Test-Path -LiteralPath $src) -and ($src -ne $dst)) {
             $changed = -not (Test-Path -LiteralPath $dst) -or ((Get-FileHash -LiteralPath $src).Hash -ne (Get-FileHash -LiteralPath $dst).Hash)
-            if ($changed) {
-                Copy-Item -LiteralPath $src -Destination $dst -Force
-                # Ny håndhever: den kompilerer PcWts3.dll på nytt neste gang.
-                if ($f -eq 'Haandhever.ps1') { Remove-Item -LiteralPath (Join-Path $InstallDir 'PcWts3.dll') -Force -ErrorAction SilentlyContinue }
-            }
+            if ($changed) { Copy-Item -LiteralPath $src -Destination $dst -Force }
         }
     }
     $langSrc = Join-Path $here 'lang'
@@ -1328,9 +1348,13 @@ function Enable-AllGames([hashtable]$Cfg, $Cands) {
 function New-AppLockerXml([hashtable]$Cfg, [string[]]$ChildSids, [string[]]$OtherSids, [string[]]$WritableDirs) {
     # Bygger en hel AppLocker-policy. Ren tekstbygging, kan testes uten Windows.
     $sb = New-Object Text.StringBuilder
+    $ids = New-Object 'System.Collections.Generic.HashSet[string]'
     function Esc([string]$s) { return [Security.SecurityElement]::Escape($s) }
     function Add-PathRule([string]$Name, [string]$Sid, [string]$Action, [string]$Path, [string[]]$Exceptions) {
-        [void]$sb.Append("<FilePathRule Id=`"$(Get-StableGuid "P|$Name|$Sid|$Action|$Path")`" Name=`"$(Esc $Name)`" Description=`"Foreldrekontroll`" UserOrGroupSid=`"$Sid`" Action=`"$Action`">")
+        # Samlingstypen ($type) er med i ID-en, og like regler legges bare inn én gang.
+        $id = Get-StableGuid "$type|P|$Name|$Sid|$Action|$Path"
+        if (-not $ids.Add($id)) { return }
+        [void]$sb.Append("<FilePathRule Id=`"$id`" Name=`"$(Esc $Name)`" Description=`"Foreldrekontroll`" UserOrGroupSid=`"$Sid`" Action=`"$Action`">")
         [void]$sb.Append("<Conditions><FilePathCondition Path=`"$(Esc $Path)`" /></Conditions>")
         if ($Exceptions -and $Exceptions.Count) {
             [void]$sb.Append('<Exceptions>')
@@ -1340,7 +1364,9 @@ function New-AppLockerXml([hashtable]$Cfg, [string[]]$ChildSids, [string[]]$Othe
         [void]$sb.Append('</FilePathRule>')
     }
     function Add-AppxRule([string]$Name, [string]$Sid, [string]$Action, [string]$Publisher, [string]$Product, [string]$Binary = '*') {
-        [void]$sb.Append("<FilePublisherRule Id=`"$(Get-StableGuid "X|$Name|$Sid|$Action|$Publisher|$Product|$Binary")`" Name=`"$(Esc $Name)`" Description=`"Foreldrekontroll`" UserOrGroupSid=`"$Sid`" Action=`"$Action`">")
+        $id = Get-StableGuid "$type|X|$Sid|$Action|$Publisher|$Product|$Binary"
+        if (-not $ids.Add($id)) { return }
+        [void]$sb.Append("<FilePublisherRule Id=`"$id`" Name=`"$(Esc $Name)`" Description=`"Foreldrekontroll`" UserOrGroupSid=`"$Sid`" Action=`"$Action`">")
         [void]$sb.Append("<Conditions><FilePublisherCondition PublisherName=`"$(Esc $Publisher)`" ProductName=`"$(Esc $Product)`" BinaryName=`"$(Esc $Binary)`">")
         [void]$sb.Append('<BinaryVersionRange LowSection="0.0.0.0" HighSection="*" /></FilePublisherCondition></Conditions></FilePublisherRule>')
     }
@@ -1374,6 +1400,7 @@ function New-AppLockerXml([hashtable]$Cfg, [string[]]$ChildSids, [string[]]$Othe
         }
         [void]$sb.Append('</RuleCollection>')
     }
+    $type = 'Appx'
     [void]$sb.Append('<RuleCollection Type="Appx" EnforcementMode="Enabled">')
     foreach ($t in @($SidEveryone) + $trusted) { Add-AppxRule 'Alle signerte pakkeapper' $t 'Allow' '*' '*' }
     foreach ($c in $ChildSids) {
@@ -1412,12 +1439,24 @@ function Restore-AppLocker([hashtable]$Cfg) {
     }
     $Cfg.Backup.AppLockerSaved = $false
     Remove-Item -LiteralPath $b -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $InstallDir 'applocker.xml') -Force -ErrorAction SilentlyContinue
 }
 
 function Set-AppLockerFromXml([string]$Xml) {
+    # Skriv til en ny fil, ta den i bruk, og gi den navnet applocker.xml bare hvis det lyktes.
+    $new = Join-Path $InstallDir 'applocker.new.xml'
     $f = Join-Path $InstallDir 'applocker.xml'
-    Set-Content -LiteralPath $f -Value $Xml -Encoding UTF8
-    Set-AppLockerPolicy -XmlPolicy $f
+    Set-Content -LiteralPath $new -Value $Xml -Encoding UTF8
+    Set-AppLockerPolicy -XmlPolicy $new
+    Move-Item -LiteralPath $new -Destination $f -Force
+}
+
+function Test-OurAppLockerActive {
+    # Sant hvis den gjeldende policyen inneholder foreldrekontrollens regler og håndhever Exe-regler.
+    try {
+        $x = Get-AppLockerPolicy -Effective -Xml
+        return ($x -match 'Description="Foreldrekontroll"' -and $x -match '<RuleCollection Type="Exe" EnforcementMode="Enabled"')
+    } catch { return $false }
 }
 
 function Get-OtherUserSids([hashtable]$Cfg) {
@@ -1470,7 +1509,7 @@ function Apply-Apps([hashtable]$Cfg, [string[]]$Writable = $null) {
             $xml = New-AppLockerXml $Cfg $childSids (Get-OtherUserSids $Cfg) $Writable
             $prev = Join-Path $InstallDir 'applocker.xml'
             $same = (Test-Path -LiteralPath $prev) -and ((Get-Content -LiteralPath $prev -Raw -Encoding UTF8).Trim() -ceq $xml.Trim()) -and
-                    -not @(Get-MissingProtections $Cfg | Where-Object { $_ -eq (T 'AppLocker-regler') }).Count
+                    (Test-OurAppLockerActive)
             if (-not $same) {
                 Set-AppLockerFromXml $xml
                 [void](Invoke-Native "$env:windir\System32\gpupdate.exe" '/target:computer /force')
@@ -1500,7 +1539,8 @@ function Test-HasWifi {
 
 function Get-VisibleSsids {
     $r = Invoke-Native "$env:windir\System32\netsh.exe" 'wlan show networks mode=ssid'
-    return @([regex]::Matches($r.Output, '(?m)^SSID \d+\s*:\s*(.*?)\s*$') | ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ } | Sort-Object -Unique)
+    $list = @([regex]::Matches($r.Output, '(?m)^SSID \d+\s*:\s*(.*?)\s*$') | ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ })
+    return @(Get-UniqueSsids $list)
 }
 
 function Get-SavedSsids {
@@ -1532,7 +1572,7 @@ function Get-PrefixSsids([hashtable]$Cfg) {
     foreach ($p in @($Cfg.Wifi.BlockPrefixes | Where-Object { $_ })) {
         for ($i = 1; $i -le [int]$Cfg.Wifi.PrefixMax; $i++) { $res += "$p$i" }
     }
-    return , $res
+    return $res
 }
 
 function Test-PrefixSsid([hashtable]$Cfg, [string]$Ssid) {
@@ -1546,6 +1586,27 @@ function Format-Prefixes([hashtable]$Cfg) {
     $p = @($Cfg.Wifi.BlockPrefixes | Where-Object { $_ })
     if ($p.Count -eq 0) { return (T 'ingen') }
     return (($p | ForEach-Object { "${_}1, ${_}2, ${_}3 ..." }) -join '; ')
+}
+
+function Get-UniqueSsids {
+    # Fjerner like navn med store/små bokstaver tatt hensyn til. Wi-Fi-navn skiller mellom dem
+    # ("anlegg3" og "Anlegg3" er to nettverk), men Sort-Object -Unique gjør det ikke.
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $res = New-Object System.Collections.ArrayList
+    foreach ($x in @($args | ForEach-Object { $_ } | ForEach-Object { $_ })) {
+        if ($x -and $set.Add([string]$x)) { [void]$res.Add([string]$x) }
+    }
+    return [string[]]($res | Sort-Object -CaseSensitive)
+}
+
+function Get-WlanFilterText {
+    return (Invoke-Native "$env:windir\System32\netsh.exe" 'wlan show filters').Output
+}
+
+function Test-WlanFilterPresent([string]$FilterText, [string]$Ssid) {
+    # Ser etter nettverksnavnet som eget ord i "netsh wlan show filters" (virker på alle språk;
+    # "Anlegg1" treffer ikke "Anlegg10").
+    return ($FilterText -cmatch ('(?<![\w])' + [regex]::Escape($Ssid) + '(?![\w])'))
 }
 
 function Get-WifiModeTexts {
@@ -1578,7 +1639,7 @@ function Menu-Wifi([hashtable]$Cfg) {
     }
     elseif ($choice -in @('1', '2')) {
         $saved = Get-SavedSsids
-        $names = @(@($saved | ForEach-Object { $_.Ssid }) + (Get-VisibleSsids) + @($Cfg.Wifi.Ssids) | Where-Object { $_ } | Sort-Object -Unique)
+        $names = @(Get-UniqueSsids @($saved | ForEach-Object { $_.Ssid }) (Get-VisibleSsids) @($Cfg.Wifi.Ssids))
         $current = Get-CurrentSsid
         if (-not $current -and (Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -and $_.PhysicalMediaType -match '802\.11' })) {
             Write-Warn 'Windows viser ikke navnet på nettverket du er koblet til.'
@@ -1604,7 +1665,7 @@ function Menu-Wifi([hashtable]$Cfg) {
             if ($sel.Count -eq 0) { Write-Err 'Du må velge minst ett nettverk.'; Wait-Key; return }
             $Cfg.Wifi.Mode = 'allow'
         } else { $Cfg.Wifi.Mode = 'block' }
-        $Cfg.Wifi.Ssids = @($sel | Sort-Object -Unique)
+        $Cfg.Wifi.Ssids = @(Get-UniqueSsids $sel)
     }
     Write-Host ''
     Write-Info 'Barnet kan gå rundt Wi-Fi-filteret ved å koble en mobil til med USB eller Bluetooth (deling av mobilnett).'
@@ -1620,6 +1681,8 @@ function Apply-Wifi([hashtable]$Cfg, [switch]$Remove) {
     $oldMode = [string]$Cfg.Wifi.AppliedMode
     $oldList = @($Cfg.Wifi.AppliedSsids | Where-Object { $_ })
     $newList = if ($mode -eq 'off') { @() } else { @($Cfg.Wifi.Ssids | Where-Object { $_ }) }
+    # Det Windows faktisk har (en oppdatering kan ha fjernet filtre som bokføringen sier finnes).
+    $present = Get-WlanFilterText
     function Add-WlanFilter([string]$Perm, [string]$Ssid) {
         $r = Invoke-Native $netsh "wlan add filter permission=$Perm ssid=`"$Ssid`" networktype=infrastructure"
         if ($r.ExitCode -ne 0) { Write-Warn "Wi-Fi-filter for '{0}' feilet: {1}" $Ssid $($r.Output.Trim()) }
@@ -1628,7 +1691,10 @@ function Apply-Wifi([hashtable]$Cfg, [switch]$Remove) {
     # ville koblet PC-en fra nettet et øyeblikk (og kastet barnet ut av et nettspill).
     if ($oldMode -eq $mode -and $mode -ne 'off') {
         $perm = if ($mode -eq 'allow') { 'allow' } else { 'block' }
-        foreach ($s in $newList) { if ($oldList -cnotcontains $s) { Add-WlanFilter $perm $s } }
+        foreach ($s in $newList) { if ($oldList -cnotcontains $s -or -not (Test-WlanFilterPresent $present $s)) { Add-WlanFilter $perm $s } }
+        # "Sperr alt annet" skal alltid finnes i disse modusene (å legge det til igjen er ufarlig).
+        if ($mode -eq 'allow') { [void](Invoke-Native $netsh 'wlan add filter permission=denyall networktype=infrastructure') }
+        [void](Invoke-Native $netsh 'wlan add filter permission=denyall networktype=adhoc')
         foreach ($s in $oldList) { if ($newList -cnotcontains $s) { [void](Invoke-Native $netsh "wlan delete filter permission=$perm ssid=`"$s`" networktype=infrastructure") } }
     } else {
         # Ny modus: legg til de nye filtrene først, fjern de gamle etterpå.
@@ -1664,22 +1730,29 @@ function Apply-Wifi([hashtable]$Cfg, [switch]$Remove) {
     # med mindre en voksen har tillatt et av dem med vilje.
     $oldPrefix = @($Cfg.Wifi.AppliedPrefixSsids | Where-Object { $_ })
     $byEnforcer = @()
+    # Gi tilstandsfilen et nytt navn før den leses, så navn håndheveren legger til imens ikke går tapt.
+    $stateCopy = "$WifiStatePath.lest"
     if (Test-Path -LiteralPath $WifiStatePath) {
-        try { $byEnforcer = @(Get-Content -LiteralPath $WifiStatePath -Raw -Encoding UTF8 | ConvertFrom-Json | ForEach-Object { $_ }) } catch { }
+        try {
+            Move-Item -LiteralPath $WifiStatePath -Destination $stateCopy -Force
+            $byEnforcer = @(Get-Content -LiteralPath $stateCopy -Raw -Encoding UTF8 | ConvertFrom-Json | ForEach-Object { $_ } | ForEach-Object { $_ })
+        } catch { }
     }
+    # Pakk ut nestede lister fra eldre versjoner.
+    $oldPrefix = @($oldPrefix | ForEach-Object { $_ } | ForEach-Object { $_ } | Where-Object { $_ })
     $wantPrefix = @()
     $usePrefix = (-not $Remove) -and @($Cfg.Wifi.BlockPrefixes | Where-Object { $_ }).Count
     if ($usePrefix -and $mode -ne 'allow') {
         # I "bare tillatte"-modus er navnene allerede sperret av "sperr alt annet". I "sperr"-modus står
         # navn som også er i sperrelisten, allerede der.
-        $wantPrefix = @(@(Get-PrefixSsids $Cfg) + @(Get-VisibleSsids | Where-Object { Test-PrefixSsid $Cfg $_ }) + @($byEnforcer) |
-            Where-Object { $_ } | Sort-Object -Unique | Where-Object { -not ($mode -eq 'block' -and $newList -ccontains $_) })
+        $wantPrefix = @(Get-UniqueSsids @(Get-PrefixSsids $Cfg) @(Get-VisibleSsids | Where-Object { Test-PrefixSsid $Cfg $_ }) @(@($byEnforcer) + @($oldPrefix) | Where-Object { Test-PrefixSsid $Cfg $_ }) |
+            Where-Object { -not ($mode -eq 'block' -and $newList -ccontains $_) })
     }
-    $have = @($oldPrefix + $byEnforcer | Where-Object { $_ } | Sort-Object -Unique)
-    foreach ($s in $wantPrefix) { if ($have -cnotcontains $s) { [void](Invoke-Native $netsh "wlan add filter permission=block ssid=`"$s`" networktype=infrastructure") } }
+    $have = @(Get-UniqueSsids $oldPrefix $byEnforcer)
+    foreach ($s in $wantPrefix) { if ($have -cnotcontains $s -or -not (Test-WlanFilterPresent $present $s)) { [void](Invoke-Native $netsh "wlan add filter permission=block ssid=`"$s`" networktype=infrastructure") } }
     foreach ($s in $have) { if ($wantPrefix -cnotcontains $s -and -not ($mode -eq 'block' -and $newList -ccontains $s)) { [void](Invoke-Native $netsh "wlan delete filter permission=block ssid=`"$s`" networktype=infrastructure") } }
     $Cfg.Wifi.AppliedPrefixSsids = @($wantPrefix)
-    if (Test-Path -LiteralPath $WifiStatePath) { Remove-Item -LiteralPath $WifiStatePath -Force }
+    if (Test-Path -LiteralPath $stateCopy) { Remove-Item -LiteralPath $stateCopy -Force }
     if ($usePrefix) {
         $saved = Get-SavedSsids
         foreach ($p in ($saved | Where-Object { Test-PrefixSsid $Cfg $_.Ssid })) {
@@ -1780,7 +1853,7 @@ function Apply-Web([hashtable]$Cfg, [switch]$Remove) {
                 if (-not (Get-DnsClientDohServerAddress -ServerAddress $ip -ErrorAction SilentlyContinue)) {
                     try {
                         Add-DnsClientDohServerAddress -ServerAddress $ip -DohTemplate $p.DoH -AllowFallbackToUdp $true -AutoUpgrade $true -ErrorAction Stop | Out-Null
-                        $Cfg.Web.DohAdded = @($Cfg.Web.DohAdded) + @($ip)
+                        $Cfg.Web.DohAdded = @(@($Cfg.Web.DohAdded) + @($ip) | Sort-Object -Unique)
                         $dnsChanged = $true
                     } catch { }
                 }
@@ -1798,9 +1871,17 @@ function Apply-Web([hashtable]$Cfg, [switch]$Remove) {
     } else {
         # Bare kort som foreldrekontrollen faktisk endret (de har en sikkerhetskopi). Andre kort, for
         # eksempel med egen fast DNS, røres ikke.
+        $filterV4 = @($Cfg.Web.Servers | Where-Object { $_ -notlike '*:*' })
         foreach ($nic in $nics) {
             $key = [string]$nic.InterfaceGuid
-            if (-not $Cfg.Backup.Dns.ContainsKey($key)) { continue }
+            if (-not $Cfg.Backup.Dns.ContainsKey($key)) {
+                # Kort uten sikkerhetskopi (for eksempel et nytt kort håndheveren satte filter-DNS på):
+                # tilbakestill bare hvis det fortsatt bruker filter-DNS.
+                if ($filterV4.Count -and (Test-NicDns $nic $filterV4)) {
+                    Set-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -ResetServerAddresses -ErrorAction SilentlyContinue
+                }
+                continue
+            }
             $old = [string]$Cfg.Backup.Dns[$key]
             if ($old) { Set-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -ServerAddresses ($old -split ',') -ErrorAction SilentlyContinue }
             else { Set-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -ResetServerAddresses -ErrorAction SilentlyContinue }
@@ -1934,17 +2015,24 @@ function Get-MissingProtections([hashtable]$Cfg) {
     # Rask helsesjekk av sperrene som en oppdatering kan fjerne.
     $missing = @()
     $needTask = $Cfg.ScreenTime.Enabled -or $Cfg.Web.Enabled -or @($Cfg.Wifi.BlockPrefixes | Where-Object { $_ }).Count
-    if ($needTask -and -not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) { $missing += (T 'håndhever-oppgaven') }
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($needTask -and (-not $task -or [string]$task.State -eq 'Disabled')) { $missing += (T 'håndhever-oppgaven') }
     if ($Cfg.Apps.Enabled -and @($Cfg.Children).Count -and -not (Test-IsHomeEdition)) {
-        $ok = $false
-        try { $ok = @((Get-AppLockerPolicy -Effective).RuleCollections | Where-Object { [string]$_.RuleCollectionType -eq 'Exe' -and @($_).Count -gt 0 }).Count -gt 0 } catch { }
-        if (-not $ok) { $missing += (T 'AppLocker-regler') }
+        if (-not (Test-OurAppLockerActive)) { $missing += (T 'AppLocker-regler') }
         $svc = Get-Service AppIDSvc -ErrorAction SilentlyContinue
         if (-not $svc -or [string]$svc.StartType -ne 'Automatic') { $missing += (T 'AppLocker-tjenesten') }
     }
-    $fw = @(Get-NetFirewallRule -Group $FwGroup -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+    $fw = @(Get-NetFirewallRule -Group $FwGroup -ErrorAction SilentlyContinue | Where-Object { [string]$_.Enabled -eq 'True' } | ForEach-Object { $_.Name })
     if ($Cfg.Web.Enabled -and $Cfg.Web.BlockPublicDns -and $fw -notcontains 'FK-DNS-tcp') { $missing += (T 'brannmurregler for DNS') }
     if ($Cfg.Vpn.Enabled -and $Cfg.Vpn.BlockPorts -and $fw -notcontains 'FK-VPN-pptp') { $missing += (T 'brannmurregler for VPN') }
+    # Wi-Fi-filtre: de valgte nettverkene og det første navnet for hvert alltid sperrede prefiks.
+    if (Test-HasWifi) {
+        $ft = Get-WlanFilterText
+        $need = @()
+        if ($Cfg.Wifi.Mode -in @('allow', 'block')) { $need += @($Cfg.Wifi.Ssids | Where-Object { $_ }) }
+        if ($Cfg.Wifi.Mode -ne 'allow') { $need += @($Cfg.Wifi.BlockPrefixes | Where-Object { $_ } | ForEach-Object { "${_}1" }) }
+        if (@($need | Where-Object { -not (Test-WlanFilterPresent $ft $_) }).Count) { $missing += (T 'Wi-Fi-filtre') }
+    }
     if ($Cfg.Vpn.Enabled -and $Cfg.Vpn.DisableBuiltin) {
         $ras = Get-Service RasMan -ErrorAction SilentlyContinue
         if ($ras -and [string]$ras.StartType -ne 'Disabled') { $missing += (T 'VPN-tjenestene') }
@@ -1965,7 +2053,10 @@ function Register-UpdateTask([hashtable]$Cfg, [bool]$Remove = $false) {
     if (-not $Cfg.AutoReapply.LastBuild) { $Cfg.AutoReapply.LastBuild = Get-WindowsBuild }
     $ps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
     $arg = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File &quot;$InstallDir\Setup-Foreldrekontroll.ps1&quot; -EtterOppdatering"
-    $noon = (Get-Date).Date.AddHours(12).ToString("yyyy-MM-dd'T'HH:mm:ss", [Globalization.CultureInfo]::InvariantCulture)
+    # Neste klokka 12 (ikke en som har vært i dag, ellers kunne oppgaven startet med en gang).
+    $next = (Get-Date).Date.AddHours(12)
+    if ($next -le (Get-Date)) { $next = $next.AddDays(1) }
+    $noon = $next.ToString("yyyy-MM-dd'T'HH:mm:ss", [Globalization.CultureInfo]::InvariantCulture)
     $xml = @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -2114,6 +2205,7 @@ function Invoke-ApplyAll([hashtable]$Cfg) {
         @{ N = 'Ekstra';       S = { Apply-Extra $Cfg } }
     )
     $failed = 0
+    $warn0 = [int]$script:WarnCount
     $script:InApplyAll = $true
     try {
         foreach ($s in $steps) {
@@ -2127,6 +2219,9 @@ function Invoke-ApplyAll([hashtable]$Cfg) {
             try { $null = Set-ChildHive $c $Cfg @() } catch { Write-Err "{0}: {1}" (T 'Barnas profiler') $($_.Exception.Message); $failed++ }
         }
     } finally { $script:InApplyAll = $false }
+    # Advarsler fra stegene (for eksempel at DNS eller et Wi-Fi-filter ikke kunne settes) teller også
+    # som feil, så det prøves igjen.
+    $failed += [int]$script:WarnCount - $warn0
     if ($failed -eq 0) { try { $Cfg.AutoReapply.LastBuild = Get-WindowsBuild } catch { } }
     Save-Config $Cfg
     return $failed
@@ -2144,7 +2239,7 @@ function Invoke-RemoveAll([hashtable]$Cfg) {
         @{ N = 'Påloggingstider'; S = { $Cfg.ScreenTime.Enabled = $false; foreach ($c in $Cfg.Children) { Set-LogonHours $Cfg $c } } }
         @{ N = 'Apper';      S = {
             $Cfg.Apps.Enabled = $false
-            if (-not (Test-IsHomeEdition)) { Restore-AppLocker $Cfg; Write-Ok 'AppLocker-reglene er fjernet.' }
+            if (-not (Test-IsHomeEdition) -and $Cfg.Backup.AppLockerSaved) { Restore-AppLocker $Cfg; Write-Ok 'AppLocker-reglene er fjernet.' }
             Restore-ManagedHklm $Cfg 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\Installer' 'DisableUserInstalls'
             Restore-ManagedHklm $Cfg 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'ConsentPromptBehaviorUser' } }
         @{ N = 'Wi-Fi';      S = { Apply-Wifi $Cfg -Remove } }
@@ -2179,9 +2274,10 @@ function Invoke-RemoveAll([hashtable]$Cfg) {
         }
     }
     Save-Config $Cfg
-    foreach ($f in @('PcWts3.dll', 'dns-reparert.json', 'applocker.xml', 'usage.json', 'wifi-sperret.json', 'etter-oppdatering.log', 'etter-oppdatering.log.old')) {
+    foreach ($f in @('dns-reparert.json', 'applocker.xml', 'applocker.new.xml', 'usage.json', 'wifi-sperret.json', 'etter-oppdatering.log', 'etter-oppdatering.log.old')) {
         Remove-Item -LiteralPath (Join-Path $InstallDir $f) -Force -ErrorAction SilentlyContinue
     }
+    Get-ChildItem -LiteralPath $InstallDir -Filter 'PcWts*.dll' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
     Write-Ok 'Foreldrekontrollen er fjernet. Start PC-en på nytt for at alt skal gjelde fullt ut.'
 }
 
@@ -2236,8 +2332,15 @@ function Start-Main {
     $script:SettingsLock = Lock-Settings
     if (-not $script:SettingsLock) {
         Write-Err 'En annen kjøring av foreldrekontrollen pågår. Prøv igjen om litt.'
+        if ($script:AutoMode) {
+            try { Add-Content -LiteralPath "$InstallDir\etter-oppdatering.log" -Value ('{0:yyyy-MM-dd HH:mm} {1}' -f (Get-Date), (T 'En annen kjøring av foreldrekontrollen pågår. Prøv igjen om litt.')) -Encoding UTF8 } catch { }
+        }
         return
     }
+    try { Start-MainLocked } finally { $script:SettingsLock.Dispose(); $script:SettingsLock = $null }
+}
+
+function Start-MainLocked {
     $cfg = Get-Config
     if ($null -eq $cfg) {
         Write-Err 'Konfigurasjonen ({0}) er skadet, og sikkerhetskopien kan heller ikke leses. Ingenting er endret.' $ConfigPath

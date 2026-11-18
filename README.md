@@ -130,6 +130,7 @@ Logg så inn som voksen, velg **11** og kontroller med **9** at alt er borte.
 - `Start-Foreldrekontroll.cmd`: starter oppsettet som administrator
 - `lang/uk.psd1`: ukrainske tekster (norsk tekst er nøkkelen)
 - `tests/Test-Oversettelser.ps1`: sjekker at alle tekster er oversatt og at plassholderne stemmer
+- `tests/Test-Logikk.ps1`: tester Wi-Fi-filtrene (særlig Anlegg1 til Anlegg50) mot en simulert netsh, konfigurasjonsfilene og AppLocker-reglene
 - `tests/Test-EtterOppdatering.ps1`: tester når innstillingene brukes på nytt etter oppdateringer, og at oppgave-XML-en er gyldig
 - `tests/Test-Kulturer.ps1`: kjører det ukrainske grensesnittet med norsk, engelsk og ukrainsk Windows-kultur (formatering, ja/nei-svar og menybokstaver fra ukrainsk tastatur)
 

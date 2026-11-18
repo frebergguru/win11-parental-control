@@ -290,6 +290,7 @@
     'Wi-Fi-filter: bare {0}' = 'Фільтр Wi-Fi: лише {0}'
     'Wi-Fi-filter: sperret: {0}' = 'Фільтр Wi-Fi: заблоковано {0}'
     'Wi-Fi-filteret er av.' = 'Фільтр Wi-Fi вимкнено.'
+    'Wi-Fi-filtre' = 'фільтри Wi-Fi'
     'Windows er oppdatert ({0} til {1}).' = 'Windows оновлено (з {0} до {1}).'
     'Windows Home: disse appene ble fjernet for barnet: {0}' = 'Windows Home: для дитини видалено такі програми: {0}'
     'Windows viser ikke navnet på nettverket du er koblet til.' = 'Windows не показує назву мережі, до якої ви підключені.'
